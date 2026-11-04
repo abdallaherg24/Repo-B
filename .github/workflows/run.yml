@@ -1,0 +1,171 @@
+name: vps-relay
+on:
+  workflow_dispatch:
+    inputs:
+      receive:
+        description: "استقبل الملفات من الجهاز الثاني"
+        required: false
+        default: "false"
+  schedule:
+    - cron: '*/15 * * * *'
+
+env:
+  MY_NAME: vps-b
+  PEER_NAME: vps-a
+  PEER_REPO: galaljiu86-sudo/Repo-A
+  PEER_BRANCH: main
+  START_CMD: "bash start.sh"
+  HANDOFF_MIN: "300"
+  LAST_MIN: "355"
+  OVERLAP_SEC: "180"
+  READY_WAIT_SEC: "420"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - name: حارس يمنع تكرار التشغيل
+        id: guard
+        if: github.event_name == 'schedule'
+        env:
+          PAT: ${{ secrets.PAT }}
+          GHT: ${{ github.token }}
+        run: |
+          count() {
+            n=$(curl -s -H "Authorization: Bearer $1" \
+              "https://api.github.com/repos/$2/actions/runs?status=$3" | jq '.total_count // 0' 2>/dev/null)
+            echo "${n:-0}"
+          }
+          me=$(($(count "$GHT" "${{ github.repository }}" in_progress) + $(count "$GHT" "${{ github.repository }}" queued)))
+          peer=$(($(count "$PAT" "$PEER_REPO" in_progress) + $(count "$PAT" "$PEER_REPO" queued)))
+          echo "me=$me peer=$peer"
+          if [ "$me" -gt 1 ] || [ "$peer" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "فيه سلسلة شغالة، هخرج"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.skip != 'true'
+
+      - name: علم وقت البداية
+        if: steps.guard.outputs.skip != 'true'
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: اتصل بشبكة Tailscale
+        if: steps.guard.outputs.skip != 'true'
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: ${{ env.MY_NAME }}
+          args: --ssh
+
+      - name: استقبل الملفات من الجهاز القديم
+        if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive == 'true'
+        run: |
+          sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
+          mkdir -p data
+          echo "بستنى الملفات لحد 15 دقيقة..."
+          timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
+          ls -la data
+
+      - name: شغل الخدمة وأعلن إنك جاهز
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          mkdir -p data
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg python3-pip netcat-openbsd jq > /dev/null
+          
+          # تثبيت أدوات المونتاج وتفريغ الصوت في السيرفر
+          pip install --quiet faster-whisper auto-editor yt-dlp
+
+          setsid nohup $START_CMD > out.log 2>&1 &
+          sleep 5
+          
+          mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
+          setsid nohup python3 -m http.server 9001 --directory /tmp/ready > /dev/null 2>&1 &
+          echo "الجهاز جاهز والـ VPS شغال"
+
+      - name: سلم للجهاز الثاني وانقل مجلد data
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          PAT: ${{ secrets.PAT }}
+        run: |
+          sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
+          elapsed() { echo $(($(date +%s) - JOB_START)); }
+          peer_runs() {
+            for s in in_progress queued; do
+              curl -s -H "Authorization: Bearer $PAT" \
+                "https://api.github.com/repos/$PEER_REPO/actions/runs?status=$s" | jq '.total_count // 0'
+            done | awk '{n+=$1} END{print n+0}'
+          }
+          dispatch() {
+            curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$PEER_REPO/actions/workflows/run.yml/dispatches" \
+              -d "{\"ref\":\"$PEER_BRANCH\",\"inputs\":{\"receive\":\"true\"}}"
+          }
+          discover() {
+            sudo tailscale status --json | jq -r --arg n "$PEER_NAME" \
+              '[.Peer[]? | select(.Online==true) | select(.HostName | test("^"+$n+"(-[0-9]+)?$"))] | sort_by(.Created) | last | .TailscaleIPs[0] // empty'
+          }
+          wait=$((HANDOFF_MIN*60 - $(elapsed)))
+          [ "$wait" -gt 0 ] && sleep "$wait"
+          IP=""; SENT=0; READY=0; LAST_DISPATCH=-9999
+          while [ "$(elapsed)" -lt $((LAST_MIN*60)) ]; do
+            if [ -z "$IP" ] && [ $(($(elapsed) - LAST_DISPATCH)) -ge 300 ] && [ "$(peer_runs)" -eq 0 ]; then
+              echo "dispatch -> $(dispatch)"
+              LAST_DISPATCH=$(elapsed)
+            fi
+            [ -z "$IP" ] && IP=$(discover)
+            if [ -n "$IP" ] && [ "$SENT" = 0 ]; then
+              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "تم نقل مجلد data بالكامل بدون حذف أي شيء"; fi
+            fi
+            if [ -n "$IP" ] && curl -sf --max-time 5 "http://$IP:9001/ready" > /dev/null; then
+              READY=1; break
+            fi
+            sleep 10
+          done
+          if [ "$READY" = 1 ]; then
+            echo "الجهاز الثاني استلم الملفات وجهز، السيرفر القديم سيتوقف بعد التداخل"
+            sleep "$OVERLAP_SEC"
+            pkill -f "$START_CMD" || true
+          else
+            echo "تحذير: الثاني لم يجهز في الوقت، سأستمر في العمل لآخر لحظة"
+          fi
+          rest=$((357*60 - $(elapsed)))
+          [ "$rest" -gt 0 ] && sleep "$rest"
+```[cite: 73, 74, 75]
+
+---
+
+### 2. الملف `start.sh` (في الجذر الرئيسي لـ Repo-B)
+أنشئه في الجذر بنفس الكيفية:
+
+```bash
+#!/usr/bin/env bash
+set -u
+cd "$(dirname "$0")"
+
+mkdir -p data/raw_inputs data/final_shorts data/segments data/db
+
+echo "=== VPS System is running ===" >> out.log
+echo "يمكنك الاتصال عبر SSH وفتح الـ Terminal للعمل بحرية داخل مجلد $(pwd)" >> out.log
+
+# حلقة انتظار لحفظ السيرفر شغال دائماً دون إغلاق
+while true; do
+  sleep 60
+done
+```[cite: 76]
+
+---
+
+## رابعاً: طريقة التشغيل والدخول للـ Terminal
+
+1. ادخل إلى **`Repo-A`** -> تبويب **Actions** -> اختر **`vps-relay`** واضغط على **Run workflow**.
+2. بمجرد عمل السيرفر، افتح الـ Terminal من جهازك المربوط بشبكة Tailscale واستخدم الأمر:
+   ```bash
+   ssh runner@vps-a
+   # أو بعد التبديل للثاني:
+   ssh runner@vps-b
