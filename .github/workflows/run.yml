@@ -12,7 +12,7 @@ on:
 env:
   MY_NAME: vps-b
   PEER_NAME: vps-a
-  PEER_REPO: galaljiu86-sudo/Repo-A
+  PEER_REPO: abdallaherg24/Repo-A
   PEER_BRANCH: main
   START_CMD: "bash start.sh"
   HANDOFF_MIN: "300"
@@ -136,36 +136,3 @@ jobs:
           fi
           rest=$((357*60 - $(elapsed)))
           [ "$rest" -gt 0 ] && sleep "$rest"
-```[cite: 73, 74, 75]
-
----
-
-### 2. الملف `start.sh` (في الجذر الرئيسي لـ Repo-B)
-أنشئه في الجذر بنفس الكيفية:
-
-```bash
-#!/usr/bin/env bash
-set -u
-cd "$(dirname "$0")"
-
-mkdir -p data/raw_inputs data/final_shorts data/segments data/db
-
-echo "=== VPS System is running ===" >> out.log
-echo "يمكنك الاتصال عبر SSH وفتح الـ Terminal للعمل بحرية داخل مجلد $(pwd)" >> out.log
-
-# حلقة انتظار لحفظ السيرفر شغال دائماً دون إغلاق
-while true; do
-  sleep 60
-done
-```[cite: 76]
-
----
-
-## رابعاً: طريقة التشغيل والدخول للـ Terminal
-
-1. ادخل إلى **`Repo-A`** -> تبويب **Actions** -> اختر **`vps-relay`** واضغط على **Run workflow**.
-2. بمجرد عمل السيرفر، افتح الـ Terminal من جهازك المربوط بشبكة Tailscale واستخدم الأمر:
-   ```bash
-   ssh runner@vps-a
-   # أو بعد التبديل للثاني:
-   ssh runner@vps-b
