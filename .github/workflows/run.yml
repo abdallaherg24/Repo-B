@@ -49,13 +49,13 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.guard.outputs.skip != 'true'
 
-      - name: استرجاع جلسات فيسبوك وانستجرام من السيكرتس
+      - name: استرجاع وفك تشفير جلسات فيسبوك وانستجرام من السيكرتس
         if: steps.guard.outputs.skip != 'true'
         run: |
           mkdir -p data
-          echo '${{ secrets.FB_STATE_JSON }}' > data/fb_state.json
-          echo '${{ secrets.IG_STATE_JSON }}' > data/ig_state.json
-          echo "تم استرجاع ملفات الجلسات بنجاح في مجلد data"
+          echo "${{ secrets.FB_STATE_JSON }}" | base64 -d > data/fb_state.json
+          echo "${{ secrets.IG_STATE_JSON }}" | base64 -d > data/ig_state.json
+          echo "تم فك تشفير واسترجاع ملفات الجلسات بنجاح في مجلد data"
 
       - name: علّم وقت البداية
         if: steps.guard.outputs.skip != 'true'
@@ -151,7 +151,7 @@ jobs:
           done
 
           if [ "$READY" = 1 ]; then
-            echo "التاني بيبث فعلاً. الاتنين شغالين مع me ${OVERLAP_SEC} ثانية"
+            echo "التاني بيبث فعلاً. الاتنين شغالين مع بعض ${OVERLAP_SEC} ثانية"
             sleep "$OVERLAP_SEC"
             pkill -f "$START_CMD" || true
             pkill -x ffmpeg || true
