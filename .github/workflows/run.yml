@@ -51,11 +51,14 @@ jobs:
 
       - name: استرجاع وفك تشفير جلسات فيسبوك وانستجرام من السيكرتس
         if: steps.guard.outputs.skip != 'true'
+        env:
+          FB_B64: ${{ secrets.FB_STATE_JSON }}
+          IG_B64: ${{ secrets.IG_STATE_JSON }}
         run: |
           mkdir -p data
-          echo "${{ secrets.FB_STATE_JSON }}" | base64 -d > data/fb_state.json
-          echo "${{ secrets.IG_STATE_JSON }}" | base64 -d > data/ig_state.json
-          echo "تم فك تشفير واسترجاع ملفات الجلسات بنجاح في مجلد data"
+          printf '%s' "$FB_B64" | sed '/-----/d' | tr -d '\r\n ' | base64 -d > data/fb_state.json
+          printf '%s' "$IG_B64" | sed '/-----/d' | tr -d '\r\n ' | base64 -d > data/ig_state.json
+          echo "fb: $(wc -c < data/fb_state.json) bytes, ig: $(wc -c < data/ig_state.json) bytes"
 
       - name: علّم وقت البداية
         if: steps.guard.outputs.skip != 'true'
@@ -86,7 +89,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install streamlink playwright TikTokLive
           playwright install --with-deps chromium
-          
+
           setsid nohup $START_CMD > out.log 2>&1 &
 
           sleep 15
