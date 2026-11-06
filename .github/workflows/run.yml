@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       receive:
-        description: "استقبل الملفات من الجهاز التاني"
+        description: "استقبل الملفات من الجهاز الثاني"
         required: false
         default: "false"
   schedule:
@@ -38,29 +38,33 @@ jobs:
               "https://api.github.com/repos/$2/actions/runs?status=$3" | jq '.total_count // 0' 2>/dev/null)
             echo "${n:-0}"
           }
-          me=$(( $(count "$GHT" "${{ github.repository }}" in_progress) + $(count "$GHT" "${{ github.repository }}" queued) ))
-          peer=$(( $(count "$PAT" "$PEER_REPO" in_progress) + $(count "$PAT" "$PEER_REPO" queued) ))
+          me=$(($(count "$GHT" "${{ github.repository }}" in_progress) + $(count "$GHT" "${{ github.repository }}" queued)))
+          peer=$(($(count "$PAT" "$PEER_REPO" in_progress) + $(count "$PAT" "$PEER_REPO" queued)))
           echo "me=$me peer=$peer"
           if [ "$me" -gt 1 ] || [ "$peer" -gt 0 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "فيه سلسلة شغالة، هخرج."
+            echo "فيه سلسلة شغالة، هخرج"
           fi
 
       - uses: actions/checkout@v4
         if: steps.guard.outputs.skip != 'true'
 
-      - name: استرجاع وفك تشفير جلسات فيسبوك وانستجرام من السيكرتس
-        if: steps.guard.outputs.skip != 'true'
+      - name: استرجاع جلسات فيسبوك وانستجرام من الـ Secrets إذا لم يتم استقبالها
+        if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive != 'true'
         env:
-          FB_B64: ${{ secrets.FB_STATE_JSON }}
-          IG_B64: ${{ secrets.IG_STATE_JSON }}
+          FB_SECRET: ${{ secrets.FB_STATE_JSON }}
+          IG_SECRET: ${{ secrets.IG_STATE_JSON }}
         run: |
           mkdir -p data
-          printf '%s' "$FB_B64" | sed '/-----/d' | tr -d '\r\n ' | base64 -d > data/fb_state.json
-          printf '%s' "$IG_B64" | sed '/-----/d' | tr -d '\r\n ' | base64 -d > data/ig_state.json
-          echo "fb: $(wc -c < data/fb_state.json) bytes, ig: $(wc -c < data/ig_state.json) bytes"
+          if [ ! -f "data/fb_state.json" ] && [ -n "$FB_SECRET" ]; then
+            python3 -c 'import os; open("data/fb_state.json", "w", encoding="utf-8").write(os.environ["FB_SECRET"])'
+          fi
+          if [ ! -f "data/ig_state.json" ] && [ -n "$IG_SECRET" ]; then
+            python3 -c 'import os; open("data/ig_state.json", "w", encoding="utf-8").write(os.environ["IG_SECRET"])'
+          fi
+          echo "تم فحص واسترجاع ملفات الجلسات في مجلد data"
 
-      - name: علّم وقت البداية
+      - name: علم وقت البداية
         if: steps.guard.outputs.skip != 'true'
         run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
 
@@ -72,52 +76,42 @@ jobs:
           hostname: ${{ env.MY_NAME }}
           args: --ssh
 
-      - name: استقبل الملفات من الجهاز القديم
+      - name: استقبل الملفات من الجهاز الثاني
         if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive == 'true'
         run: |
           sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
           mkdir -p data
-          echo "بستنى الملفات (لحد 15 دقيقة)..."
+          echo "بستنى الملفات لحد 15 دقيقة..."
           timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
           ls -la data
 
-      - name: تثبيت الاعتمادات وتشغيل الخدمة
+      - name: شغل الخدمة الأساسية وأعلن إنك جاهز
         if: steps.guard.outputs.skip != 'true'
         run: |
+          mkdir -p data
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg > /dev/null
-          python -m pip install --upgrade pip
-          pip install streamlink playwright TikTokLive
-          playwright install --with-deps chromium
+          sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
 
           setsid nohup $START_CMD > out.log 2>&1 &
+          sleep 3
+          
+          mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
+          setsid nohup python3 -m http.server 9001 --directory /tmp/ready > /dev/null 2>&1 &
+          echo "الـ VPS جاهز وشغال"
 
-          sleep 15
-          if pgrep -f "$START_CMD" > /dev/null; then
-            mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
-            setsid nohup python3 -m http.server 9001 --directory /tmp/ready > /dev/null 2>&1 &
-            echo "البث شغال فعلاً، الجهاز جاهز"
-          else
-            echo "البث ما اشتغلش، راجع out.log"
-            cat out.log || true
-            exit 1
-          fi
-
-      - name: سلّم للجهاز التاني
+      - name: سلم للجهاز الثاني وانقل مجلد data
         if: steps.guard.outputs.skip != 'true'
         env:
           PAT: ${{ secrets.PAT }}
         run: |
           sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
-          elapsed() { echo $(( $(date +%s) - JOB_START )); }
-
+          elapsed() { echo $(($(date +%s) - JOB_START)); }
           peer_runs() {
             for s in in_progress queued; do
               curl -s -H "Authorization: Bearer $PAT" \
                 "https://api.github.com/repos/$PEER_REPO/actions/runs?status=$s" | jq '.total_count // 0'
             done | awk '{n+=$1} END{print n+0}'
           }
-
           dispatch() {
             curl -s -o /dev/null -w "%{http_code}" -X POST \
               -H "Authorization: Bearer $PAT" \
@@ -125,42 +119,33 @@ jobs:
               "https://api.github.com/repos/$PEER_REPO/actions/workflows/run.yml/dispatches" \
               -d "{\"ref\":\"$PEER_BRANCH\",\"inputs\":{\"receive\":\"true\"}}"
           }
-
           discover() {
             sudo tailscale status --json | jq -r --arg n "$PEER_NAME" \
-              '[.Peer[]? | select(.Online==true) | select(.HostName|test("^"+$n+"(-[0-9]+)?$"))] | sort_by(.Created) | last | .TailscaleIPs[0] // empty'
+              '[.Peer[]? | select(.Online==true) | select(.HostName | test("^"+$n+"(-[0-9]+)?$"))] | sort_by(.Created) | last | .TailscaleIPs[0] // empty'
           }
-
-          wait=$(( HANDOFF_MIN*60 - $(elapsed) ))
+          wait=$((HANDOFF_MIN*60 - $(elapsed)))
           [ "$wait" -gt 0 ] && sleep "$wait"
-
           IP=""; SENT=0; READY=0; LAST_DISPATCH=-9999
-          while [ "$(elapsed)" -lt $(( LAST_MIN*60 )) ]; do
-            if [ -z "$IP" ] && [ $(( $(elapsed) - LAST_DISPATCH )) -ge 300 ] && [ "$(peer_runs)" -eq 0 ]; then
+          while [ "$(elapsed)" -lt $((LAST_MIN*60)) ]; do
+            if [ -z "$IP" ] && [ $(($(elapsed) - LAST_DISPATCH)) -ge 300 ] && [ "$(peer_runs)" -eq 0 ]; then
               echo "dispatch -> $(dispatch)"
               LAST_DISPATCH=$(elapsed)
             fi
-
             [ -z "$IP" ] && IP=$(discover)
-
             if [ -n "$IP" ] && [ "$SENT" = 0 ]; then
-              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "الملفات اتبعتت"; fi
+              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "تم نقل مجلد data بالكامل بنجاح"; fi
             fi
-
             if [ -n "$IP" ] && curl -sf --max-time 5 "http://$IP:9001/ready" > /dev/null; then
               READY=1; break
             fi
             sleep 10
           done
-
           if [ "$READY" = 1 ]; then
-            echo "التاني بيبث فعلاً. الاتنين شغالين مع بعض ${OVERLAP_SEC} ثانية"
+            echo "الجهاز الثاني استلم الملفات وجهز، السيرفر القديم سيتوقف"
             sleep "$OVERLAP_SEC"
             pkill -f "$START_CMD" || true
-            pkill -x ffmpeg || true
-            echo "الجهاز ده وقف، والتاني كمل"
           else
-            echo "تحذير: التاني ما بدأش يبث قبل الحد الأقصى. هفضل شغال لآخر لحظة."
-            rest=$(( 357*60 - $(elapsed) ))
-            [ "$rest" -gt 0 ] && sleep "$rest"
+            echo "تحذير: الثاني لم يجهز في الوقت، سأستمر لآخر لحظة"
           fi
+          rest=$((357*60 - $(elapsed)))
+          [ "$rest" -gt 0 ] && sleep "$rest"
