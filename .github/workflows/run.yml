@@ -11,8 +11,8 @@ on:
     - cron: '*/15 * * * *'
 
 env:
-  MY_NAME: vps-b
-  PEER_NAME: vps-a
+  MY_NAME: servant-service
+  PEER_NAME: servant-service-a
   PEER_REPO: abdallaherg24/Repo-A
   PEER_BRANCH: main
   WORKFLOW_FILE: vps-relay.yml
@@ -41,16 +41,14 @@ jobs:
           }
           me=$(($(count "$GHT" "${{ github.repository }}" in_progress) + $(count "$GHT" "${{ github.repository }}" queued)))
           peer=$(($(count "$PAT" "$PEER_REPO" in_progress) + $(count "$PAT" "$PEER_REPO" queued)))
-          echo "me=$me peer=$peer"
           if [ "$me" -gt 1 ] || [ "$peer" -gt 0 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "فيه سلسلة شغالة، هخرج"
           fi
 
       - uses: actions/checkout@v4
         if: steps.guard.outputs.skip != 'true'
 
-      - name: تثبيت ffmpeg و yt-dlp والاعتمادات
+      - name: تثبيت الاعتمادات
         if: steps.guard.outputs.skip != 'true'
         run: |
           sudo apt-get update -qq
@@ -61,7 +59,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: اتصل بشبكة Tailscale
+      - name: اتصل بشبكة Tailscale بالاسم الثابت
         if: steps.guard.outputs.skip != 'true'
         uses: tailscale/github-action@v3
         with:
@@ -69,36 +67,31 @@ jobs:
           hostname: ${{ env.MY_NAME }}
           args: --ssh
 
-      - name: استقبل الملفات من الجهاز الثاني
+      - name: استقبل الملفات
         if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive == 'true'
         run: |
           mkdir -p data
-          echo "بستنى الملفات لحد 15 دقيقة..."
-          timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
-          ls -la data
+          timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات"
 
-      - name: شغل الخدمة الأساسية وفعيل الرابط الثابت
+      - name: تشغيل الخدمة برابط ثابت موحد
         if: steps.guard.outputs.skip != 'true'
         run: |
           mkdir -p data
-
-          # 1. تشغيل التطبيق الرئيسي main.py
           setsid nohup $START_CMD > out.log 2>&1 &
           sleep 3
 
-          # 2. تفعيل رابط Tailscale Funnel الثابت على المنفذ 8090
-          sudo tailscale funnel --bg 8090
+          sudo tailscale funnel --bg 8090 http://localhost:8090
           sleep 3
 
           echo "=============================================="
-          echo "موقعك شغال الآن على الرابط الثابت الخاص بك في Tailscale"
+          echo "رابط موقعك الثابت الموحد الدائم هو:"
+          echo "https://servant-service.tail1fedcc.ts.net"
           echo "=============================================="
 
           mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
           setsid nohup python3 -m http.server 9001 --directory /tmp/ready > /dev/null 2>&1 &
-          echo "الـ VPS جاهز وشغال"
 
-      - name: سلم للجهاز الثاني وانقل مجلد data
+      - name: تسليم المهام والبيانات
         if: steps.guard.outputs.skip != 'true'
         env:
           PAT: ${{ secrets.PAT }}
@@ -126,12 +119,12 @@ jobs:
           IP=""; SENT=0; READY=0; LAST_DISPATCH=-9999
           while [ "$(elapsed)" -lt $((LAST_MIN*60)) ]; do
             if [ -z "$IP" ] && [ $(($(elapsed) - LAST_DISPATCH)) -ge 300 ] && [ "$(peer_runs)" -eq 0 ]; then
-              echo "dispatch -> $(dispatch)"
+              dispatch
               LAST_DISPATCH=$(elapsed)
             fi
             [ -z "$IP" ] && IP=$(discover)
             if [ -n "$IP" ] && [ "$SENT" = 0 ]; then
-              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "تم نقل مجلد data بالكامل بنجاح"; fi
+              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; fi
             fi
             if [ -n "$IP" ] && curl -sf --max-time 5 "http://$IP:9001/ready" > /dev/null; then
               READY=1; break
@@ -139,11 +132,8 @@ jobs:
             sleep 10
           done
           if [ "$READY" = 1 ]; then
-            echo "الجهاز الثاني استلم الملفات وجهز، السيرفر القديم سيتوقف"
             sleep "$OVERLAP_SEC"
             pkill -f "$START_CMD" || true
-          else
-            echo "تحذير: الثاني لم يجهز في الوقت، سأستمر لآخر لحظة"
           fi
           rest=$((357*60 - $(elapsed)))
           [ "$rest" -gt 0 ] && sleep "$rest"
