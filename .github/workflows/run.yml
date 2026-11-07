@@ -77,22 +77,22 @@ jobs:
           timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
           ls -la data
 
-      - name: شغل الخدمة الأساسية وفتح الرابط الثابت
+      - name: شغل الخدمة الأساسية وفتح الرابط المباشر
         if: steps.guard.outputs.skip != 'true'
         run: |
           mkdir -p data
 
-          # تشغيل main.py في الخلفية
+          # 1. تشغيل التطبيق الرئيسي main.py
           setsid nohup $START_CMD > out.log 2>&1 &
           sleep 3
 
-          # تشغيل النفق المجاني برابط ثابت
-          setsid nohup npx localtunnel --port 8090 --subdomain servant-of-allah > lt.log 2>&1 &
+          # 2. تشغيل نفق مباشر بدون صفحات تأكيد (Pinggy)
+          setsid nohup ssh -o StrictHostKeyChecking=no -R 80:localhost:8090 a.pinggy.link > tunnel.log 2>&1 &
           sleep 5
 
           echo "=============================================="
-          echo "رابط موقعك الثابت والمجاني هو:"
-          echo "https://servant-of-allah.localtunnel.me"
+          echo "رابط الموقع المباشر بدون شاشة حماية هو:"
+          grep -o 'https://.*\.pinggy\.link' tunnel.log || cat tunnel.log
           echo "=============================================="
 
           mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
