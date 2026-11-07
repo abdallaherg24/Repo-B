@@ -11,10 +11,11 @@ on:
     - cron: '*/15 * * * *'
 
 env:
-  MY_NAME: vps-b
-  PEER_NAME: vps-a
-  PEER_REPO: abdallaherg24/Repo-A
+  MY_NAME: vps-a
+  PEER_NAME: vps-b
+  PEER_REPO: abdallaherg24/Repo-B
   PEER_BRANCH: main
+  WORKFLOW_FILE: vps-relay.yml
   START_CMD: "python3 main.py"
   HANDOFF_MIN: "300"
   LAST_MIN: "355"
@@ -49,20 +50,12 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.guard.outputs.skip != 'true'
 
-      - name: استرجاع جلسات فيسبوك وانستجرام من الـ Secrets إذا لم يتم استقبالها
-        if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive != 'true'
-        env:
-          FB_SECRET: ${{ secrets.FB_STATE_JSON }}
-          IG_SECRET: ${{ secrets.IG_STATE_JSON }}
+      - name: تثبيت ffmpeg و yt-dlp والاعتمادات
+        if: steps.guard.outputs.skip != 'true'
         run: |
-          mkdir -p data
-          if [ ! -f "data/fb_state.json" ] && [ -n "$FB_SECRET" ]; then
-            python3 -c 'import os; open("data/fb_state.json", "w", encoding="utf-8").write(os.environ["FB_SECRET"])'
-          fi
-          if [ ! -f "data/ig_state.json" ] && [ -n "$IG_SECRET" ]; then
-            python3 -c 'import os; open("data/ig_state.json", "w", encoding="utf-8").write(os.environ["IG_SECRET"])'
-          fi
-          echo "تم فحص واسترجاع ملفات الجلسات في مجلد data"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg netcat-openbsd jq python3-pip > /dev/null
+          pip3 install -U "yt-dlp[default]" flask requests --break-system-packages || pip3 install -U "yt-dlp[default]" flask requests
 
       - name: علم وقت البداية
         if: steps.guard.outputs.skip != 'true'
@@ -79,7 +72,6 @@ jobs:
       - name: استقبل الملفات من الجهاز الثاني
         if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive == 'true'
         run: |
-          sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
           mkdir -p data
           echo "بستنى الملفات لحد 15 دقيقة..."
           timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
@@ -89,9 +81,6 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         run: |
           mkdir -p data
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
-
           setsid nohup $START_CMD > out.log 2>&1 &
           sleep 3
           
@@ -104,7 +93,6 @@ jobs:
         env:
           PAT: ${{ secrets.PAT }}
         run: |
-          sudo apt-get install -y -qq netcat-openbsd jq > /dev/null
           elapsed() { echo $(($(date +%s) - JOB_START)); }
           peer_runs() {
             for s in in_progress queued; do
@@ -116,7 +104,7 @@ jobs:
             curl -s -o /dev/null -w "%{http_code}" -X POST \
               -H "Authorization: Bearer $PAT" \
               -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$PEER_REPO/actions/workflows/run.yml/dispatches" \
+              "https://api.github.com/repos/$PEER_REPO/actions/workflows/$WORKFLOW_FILE/dispatches" \
               -d "{\"ref\":\"$PEER_BRANCH\",\"inputs\":{\"receive\":\"true\"}}"
           }
           discover() {
