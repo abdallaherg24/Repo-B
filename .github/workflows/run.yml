@@ -11,9 +11,9 @@ on:
     - cron: '*/15 * * * *'
 
 env:
-  MY_NAME: vps-a
-  PEER_NAME: vps-b
-  PEER_REPO: abdallaherg24/Repo-B
+  MY_NAME: vps-b
+  PEER_NAME: vps-a
+  PEER_REPO: abdallaherg24/Repo-A
   PEER_BRANCH: main
   WORKFLOW_FILE: vps-relay.yml
   START_CMD: "python3 main.py"
