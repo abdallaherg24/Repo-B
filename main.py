@@ -253,7 +253,7 @@ function fetchJobs() {
   });
 }
 
-setInterval(fetchJobs, 1500);
+setInterval(fetchJobs, 4000);
 fetchJobs();
 </script>
 </body>
