@@ -3,13 +3,14 @@ from flask import Flask, render_template_string, request, jsonify, send_from_dir
 
 app = Flask(__name__)
 
-# مسارات حفظ البيانات للـ Relay
+# مسارات حفظ البيانات لنقلها بين السيرفرات (Relay)
 DATA_DIR = os.path.abspath("data")
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
 JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# استرجاع الوظائف السابقة عند بدء التشغيل
 jobs = {}
 if os.path.exists(JOBS_FILE):
     try:
@@ -25,7 +26,7 @@ def save_jobs():
     except Exception as e:
         print(f"Error saving jobs: {e}")
 
-# تنظيف الملفات القديمة تلقائياً (بعد 10 دقائق)
+# خادم تنظيف خلفي يمسح الملفات القديمة (أكبر من 10 دقائق) تلقائياً
 def auto_cleanup_loop():
     while True:
         try:
@@ -51,16 +52,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>yahya.com</title>
+<title>SERVANT_OF_ALLAH</title>
 <style>
   * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
   body { background-color: #0d131e; color: #f8fafc; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+  
   .header-box { text-align: center; margin-bottom: 25px; max-width: 700px; width: 100%; }
-  .site-title { color: #2dd4bf; font-size: 20px; font-weight: bold; margin-bottom: 20px; letter-spacing: 0.5px; }
+  .site-title { color: #2dd4bf; font-size: 22px; font-weight: bold; margin-bottom: 20px; letter-spacing: 1px; }
   .quran-ayah { font-size: 26px; line-height: 1.8; color: #ffffff; font-weight: normal; margin-bottom: 12px; }
   .quran-meta { color: #94a3b8; font-size: 13px; margin-bottom: 15px; }
   .quran-trans { color: #cbd5e1; font-size: 14px; line-height: 1.6; max-width: 600px; margin: 0 auto; direction: ltr; }
   .divider { height: 1px; background: #1e293b; margin: 30px 0 20px 0; width: 100%; max-width: 700px; }
+
   .container { background-color: #161e2e; border-radius: 12px; padding: 24px; width: 100%; max-width: 520px; border: 1px solid #283548; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
   .main-head { text-align: center; font-size: 20px; font-weight: bold; color: #fff; margin-bottom: 20px; }
   .form-group { margin-bottom: 16px; }
@@ -100,7 +103,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
 
 <div class="header-box">
-  <div class="site-title">yahya.com</div>
+  <div class="site-title">SERVANT_OF_ALLAH</div>
   <div class="quran-ayah">﴿ وَاتَّقُوا يَوْمًا تُرْجَعُونَ فِيهِ إِلَى اللَّهِ ۖ ثُمَّ تُوَفَّىٰ كُلُّ نَفْسٍ مَّا كَسَبَتْ وَهُمْ لَا يُظْلَمُونَ ﴾</div>
   <div class="quran-meta">سورة البقرة، الآية 281، الجزء 3، الصفحة 47</div>
   <div class="quran-trans">And be afraid of the Day when you shall be brought back to Allah. Then every person shall be paid what he earned, and they shall not be dealt with unjustly.</div>
@@ -148,7 +151,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="form-group">
     <label>الجودة</label>
     <select id="quality">
-      <option value="720" selected>720 (بدون كوكيز وأسرع سحب)</option>
+      <option value="720" selected>720 (أسرع تحميل بدون كوكيز)</option>
       <option value="1080">1080</option>
       <option value="480">480</option>
       <option value="360">360</option>
@@ -317,7 +320,7 @@ def run_ytdlp(job_id, data):
     if audio_only:
         cmd.extend(["-x", "--audio-format", "mp3"])
     else:
-        # الفرز المباشر لتخطي الكوكيز ومطابقة h264 مع m4a مباشرة
+        # فرز مباشر لتخطي الكوكيز ومطابقة h264 مع m4a بدون إعادة تشفير
         if quality == 'best':
             cmd.extend(["-S", "vcodec:h264,acodec:m4a"])
         else:
@@ -327,7 +330,7 @@ def run_ytdlp(job_id, data):
     if mode == 'segment':
         cmd.extend(["--download-sections", f"*{start_time}-{end_time}"])
 
-    # خيارات السرعة المتوازية ومحاذاة التوقيت بدون رندر معقد
+    # سحب متوازي وتثبيت التوقيت فوراً
     cmd.extend([
         "--concurrent-fragments", "32",
         "--hls-use-mpegts",
