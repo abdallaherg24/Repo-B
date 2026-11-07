@@ -77,33 +77,23 @@ jobs:
           timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
           ls -la data
 
-      - name: شغل الخدمة الأساسية وأعلن إنك جاهز وفتح الرابط
+      - name: شغل الخدمة الأساسية وفتح الرابط الثابت
         if: steps.guard.outputs.skip != 'true'
-        env:
-          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
           mkdir -p data
-          # تثبيت Cloudflared
-          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          rm cloudflared.deb
 
-          # تشغيل main.py
+          # تشغيل main.py في الخلفية
           setsid nohup $START_CMD > out.log 2>&1 &
           sleep 3
 
-          # تشغيل النفق
-          if [ -n "$TUNNEL_TOKEN" ]; then
-            setsid nohup cloudflared tunnel run --token "$TUNNEL_TOKEN" > tunnel.log 2>&1 &
-            echo "تم تشغيل النفق بالتوكن الثابت"
-          else
-            setsid nohup cloudflared tunnel --url http://localhost:8090 > tunnel.log 2>&1 &
-            sleep 8
-            echo "=============================================="
-            echo "رابط الموقع المباشر المجاني هو:"
-            grep -o 'https://.*\.trycloudflare\.com' tunnel.log || cat tunnel.log
-            echo "=============================================="
-          fi
+          # تشغيل النفق المجاني برابط ثابت
+          setsid nohup npx localtunnel --port 8090 --subdomain servant-of-allah > lt.log 2>&1 &
+          sleep 5
+
+          echo "=============================================="
+          echo "رابط موقعك الثابت والمجاني هو:"
+          echo "https://servant-of-allah.localtunnel.me"
+          echo "=============================================="
 
           mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
           setsid nohup python3 -m http.server 9001 --directory /tmp/ready > /dev/null 2>&1 &
