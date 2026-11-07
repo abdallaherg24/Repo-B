@@ -82,17 +82,22 @@ jobs:
         run: |
           mkdir -p data
 
-          # 1. تشغيل التطبيق الرئيسي main.py
+          # 1. تثبيت cloudflared
+          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          rm cloudflared.deb
+
+          # 2. تشغيل التطبيق الرئيسي
           setsid nohup $START_CMD > out.log 2>&1 &
           sleep 3
 
-          # 2. تشغيل نفق مباشر بدون صفحات تأكيد (Pinggy)
-          setsid nohup ssh -o StrictHostKeyChecking=no -R 80:localhost:8090 a.pinggy.link > tunnel.log 2>&1 &
-          sleep 5
+          # 3. تشغيل النفق المباشر
+          setsid nohup cloudflared tunnel --url http://localhost:8090 > tunnel.log 2>&1 &
+          sleep 8
 
           echo "=============================================="
-          echo "رابط الموقع المباشر بدون شاشة حماية هو:"
-          grep -o 'https://.*\.pinggy\.link' tunnel.log || cat tunnel.log
+          echo "رابط الموقع المباشر المجاني الشغال بدون حماية:"
+          grep -o 'https://.*\.trycloudflare\.com' tunnel.log || cat tunnel.log
           echo "=============================================="
 
           mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
