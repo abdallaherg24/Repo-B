@@ -77,27 +77,21 @@ jobs:
           timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
           ls -la data
 
-      - name: شغل الخدمة الأساسية وفتح الرابط المباشر
+      - name: شغل الخدمة الأساسية وفعيل الرابط الثابت
         if: steps.guard.outputs.skip != 'true'
         run: |
           mkdir -p data
 
-          # 1. تثبيت cloudflared
-          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          rm cloudflared.deb
-
-          # 2. تشغيل التطبيق الرئيسي
+          # 1. تشغيل التطبيق الرئيسي main.py
           setsid nohup $START_CMD > out.log 2>&1 &
           sleep 3
 
-          # 3. تشغيل النفق المباشر
-          setsid nohup cloudflared tunnel --url http://localhost:8090 > tunnel.log 2>&1 &
-          sleep 8
+          # 2. تفعيل رابط Tailscale Funnel الثابت على المنفذ 8090
+          sudo tailscale funnel --bg 8090
+          sleep 3
 
           echo "=============================================="
-          echo "رابط الموقع المباشر المجاني الشغال بدون حماية:"
-          grep -o 'https://.*\.trycloudflare\.com' tunnel.log || cat tunnel.log
+          echo "موقعك شغال الآن على الرابط الثابت الخاص بك في Tailscale"
           echo "=============================================="
 
           mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
