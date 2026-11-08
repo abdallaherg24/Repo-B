@@ -3,8 +3,8 @@ from flask import Flask, render_template_string, request, jsonify, send_from_dir
 
 app = Flask(__name__)
 
-# تفعيل CORS لمنع اعتراض Cloudflare للطلبات
-@app.after_request,
+# تفعيل CORS لتجاوز قيود المتصفح والـ Worker
+@app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
@@ -35,6 +35,7 @@ def save_jobs():
         except Exception as e:
             print(f"Error saving jobs: {e}")
 
+# تنظيف تلقائي للملفات القديمة بعد 10 دقائق
 def auto_cleanup_loop():
     while True:
         try:
@@ -67,16 +68,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta property="og:description" content="أداة فائقة السرعة لتحميل واقتطاع الفيديوهات بأعلى جودة">
 <meta property="og:image" content="{{ host_url }}og-image.png">
 <meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{{ host_url }}og-image.png">
 
 <style>
   * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
   body { background-color: #0d131e; color: #f8fafc; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+  
   .header-box { text-align: center; margin-bottom: 25px; max-width: 700px; width: 100%; }
   .site-title { color: #2dd4bf; font-size: 22px; font-weight: bold; margin-bottom: 20px; letter-spacing: 1px; }
   .quran-ayah { font-size: 26px; line-height: 1.8; color: #ffffff; font-weight: normal; margin-bottom: 12px; }
   .quran-meta { color: #94a3b8; font-size: 13px; margin-bottom: 15px; }
   .quran-trans { color: #cbd5e1; font-size: 14px; line-height: 1.6; max-width: 600px; margin: 0 auto; direction: ltr; }
   .divider { height: 1px; background: #1e293b; margin: 30px 0 20px 0; width: 100%; max-width: 700px; }
+
   .container { background-color: #161e2e; border-radius: 12px; padding: 24px; width: 100%; max-width: 520px; border: 1px solid #283548; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
   .main-head { text-align: center; font-size: 20px; font-weight: bold; color: #fff; margin-bottom: 20px; }
   .form-group { margin-bottom: 16px; }
@@ -88,11 +93,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .btn-tab.active { background: #14b8a6; color: #0d131e; }
   .time-picker-group { background: #0d131e; border-radius: 8px; padding: 12px; margin-bottom: 16px; border: 1px solid #283548; }
   .time-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .time-row:last-child { margin-bottom: 0; }
+  .time-label { width: 40px; color: #94a3b8; font-size: 14px; }
   .time-spinners { display: flex; align-items: center; gap: 6px; direction: ltr; }
   .spinner-box { display: flex; flex-direction: column; align-items: center; }
   .spinner-btn { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 12px; padding: 2px 6px; }
   .spinner-btn:hover { color: #14b8a6; }
   .spinner-val { background: #161e2e; border: 1px solid #283548; color: #fff; border-radius: 6px; width: 44px; height: 34px; text-align: center; line-height: 32px; font-weight: bold; font-size: 15px; }
+  .time-sep { color: #94a3b8; font-weight: bold; }
   .checkbox-group { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; color: #cbd5e1; font-size: 14px; cursor: pointer; }
   .checkbox-group input { width: 16px; height: 16px; accent-color: #14b8a6; cursor: pointer; }
   .btn-submit { width: 100%; padding: 14px; background: #2dd4bf; color: #0d131e; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
@@ -142,9 +150,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="time-label">من</div>
       <div class="time-spinners">
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_h', 1)">▲</button><div class="spinner-val" id="s_h">00</div><button class="spinner-btn" onclick="stepTime('s_h', -1)">▼</button></div>
-        <span>:</span>
+        <span class="time-sep">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_m', 1)">▲</button><div class="spinner-val" id="s_m">00</div><button class="spinner-btn" onclick="stepTime('s_m', -1)">▼</button></div>
-        <span>:</span>
+        <span class="time-sep">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_s', 1)">▲</button><div class="spinner-val" id="s_s">00</div><button class="spinner-btn" onclick="stepTime('s_s', -1)">▼</button></div>
       </div>
     </div>
@@ -152,9 +160,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="time-label">إلى</div>
       <div class="time-spinners">
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_h', 1)">▲</button><div class="spinner-val" id="e_h">00</div><button class="spinner-btn" onclick="stepTime('e_h', -1)">▼</button></div>
-        <span>:</span>
+        <span class="time-sep">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_m', 1)">▲</button><div class="spinner-val" id="e_m">03</div><button class="spinner-btn" onclick="stepTime('e_m', -1)">▼</button></div>
-        <span>:</span>
+        <span class="time-sep">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_s', 1)">▲</button><div class="spinner-val" id="e_s">00</div><button class="spinner-btn" onclick="stepTime('e_s', -1)">▼</button></div>
       </div>
     </div>
@@ -249,7 +257,7 @@ function submitDownload() {
   })
   .catch(err => {
     btn.disabled = false;
-    errBox.innerText = 'تنبيه: ' + err.message + ' - تأكد أن السيرفر يعمل على GitHub';
+    errBox.innerText = 'تنبيه: ' + err.message;
     errBox.style.display = 'block';
     fetchJobs();
   });
@@ -353,7 +361,6 @@ def start_download():
         }
         save_jobs()
 
-    # بدء التحميل فوراً في مسار منفصل لمنع تأخير الرد على السيرفر
     threading.Thread(target=run_ytdlp, args=(job_id, data)).start()
     return jsonify({'job_id': job_id})
 
@@ -383,7 +390,8 @@ def run_ytdlp(job_id, data):
         "yt-dlp",
         "--no-playlist",
         "--no-mtime",
-        "-N", "8",
+        "-N", "16",
+        "--concurrent-fragments", "16",
         "--extractor-args", "youtube:player_client=android,web"
     ]
 
