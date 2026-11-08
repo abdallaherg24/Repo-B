@@ -50,12 +50,24 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.guard.outputs.skip != 'true'
 
-      - name: تثبيت الاعتمادات
+      - name: تثبيت الاعتمادات والأدوات
         if: steps.guard.outputs.skip != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg netcat-openbsd jq python3-pip > /dev/null
           pip3 install -U "yt-dlp[default]" flask requests --break-system-packages || pip3 install -U "yt-dlp[default]" flask requests
+
+      - name: تثبيت وتفعيل Cloudflare WARP لتجاوز حظر يوتيوب
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update -qq && sudo apt-get install -y cloudflare-warp
+          warp-cli registration new || true
+          warp-cli mode warp+doh || true
+          warp-cli connect || true
+          sleep 3
+          echo "WARP شغال وجاهز لتخطي الحظر"
 
       - name: علم وقت البداية
         if: steps.guard.outputs.skip != 'true'
@@ -89,14 +101,12 @@ jobs:
           sudo dpkg -i cloudflared.deb
           rm cloudflared.deb
 
-          # تشغيل الموقع واستنى لحد ما يرد
           setsid nohup $START_CMD > out.log 2>&1 &
           for i in $(seq 1 20); do
             curl -sf http://localhost:8090/api/jobs > /dev/null && break
             sleep 1
           done
 
-          # فتح النفق واستخراج رابطه
           setsid nohup cloudflared tunnel --url http://localhost:8090 --no-autoupdate > tunnel.log 2>&1 &
           URL=""
           for i in $(seq 1 30); do
@@ -106,7 +116,6 @@ jobs:
           done
           echo "tunnel: $URL"
 
-          # تسجيل الرابط في الـ Worker (الحالي يبقى احتياطي)
           if [ -n "$URL" ]; then
             API="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_ID/values"
             OLD=$(curl -s -H "Authorization: Bearer $CF_API_TOKEN" "$API/current")
