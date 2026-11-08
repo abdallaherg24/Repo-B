@@ -2,13 +2,6 @@
 """
 SERVANT_OF_ALLAH - محمّل فيديو مبني على yt-dlp
 يعمل على GitHub Actions خلف Cloudflare Worker (نفس الملف في Repo-A و Repo-B).
-
-أهم الإصلاحات في هذه النسخة:
-1) إصلاح قفل متداخل (Deadlock) كان يجمّد السيرفر كله عند أول تحميل -> كان يظهر 503/524.
-2) كل الشبكة عبر بروكسي واحد (YTDLP_PROXY) بدون أي كوكيز.
-3) عند حظر يوتيوب للـ IP: تدوير هوية WARP تلقائياً + إعادة المحاولة بعملاء (clients) مختلفين.
-4) قص أجزاء بدقة (إعادة ترميز عند نقاط القص) => الصوت والصورة متزامنان 100%.
-5) دعم اللايف (من البداية / إيقاف وحفظ ما تم تسجيله).
 """
 import glob
 import json
@@ -38,10 +31,10 @@ DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
 JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-PROXY = os.environ.get("YTDLP_PROXY", "").strip()          # يضبطه ملف run.yml
+PROXY = os.environ.get("YTDLP_PROXY", "").strip()         # يضبطه ملف run.yml
 WARP_ROTATE = os.environ.get("WARP_ROTATE", "0") == "1"    # تدوير IP عبر warp-cli
 WARP_PORT = os.environ.get("WARP_PORT", "40000")
-FILE_TTL = int(os.environ.get("FILE_TTL", "1200"))         # يحذف الملف بعد 20 دقيقة
+FILE_TTL = int(os.environ.get("FILE_TTL", "1200"))          # يحذف الملف بعد 20 دقيقة
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "3"))    # عدد التحميلات المتوازية
 FRAGMENTS = os.environ.get("CONCURRENT_FRAGMENTS", "8")    # سرعة تحميل القطع (HLS/DASH)
 PREFLIGHT_URL = os.environ.get("PREFLIGHT_URL", "https://www.youtube.com/watch?v=jNQXAC9IVRw")
@@ -96,7 +89,6 @@ def load_jobs():
     now = time.time()
     for jid, j in list(data.items()):
         if j.get("status") in ("queued", "running"):
-            # العملية كانت شغالة على السيرفر القديم وانقطعت أثناء التبديل
             j["status"] = "failed"
             j["error"] = "انقطع التحميل أثناء تبديل/إعادة تشغيل السيرفر. أعد المحاولة."
             j["finished_at"] = now
@@ -193,7 +185,7 @@ def read_title(job_id):
 def net_args():
     a = ["--socket-timeout", "30", "--retries", "5"]
     if shutil.which("node"):
-        a += ["--js-runtimes", "node"]     # yt-dlp يحتاج JS runtime لحل تحديات يوتيوب
+        a += ["--js-runtimes", "node"]
     if PROXY:
         a += ["--proxy", PROXY]
     return a
@@ -225,12 +217,11 @@ def _warp(*args, timeout=40):
 
 
 def rotate_warp_ip(reason=""):
-    """يغيّر هوية WARP للحصول على IP جديد (مفيد عندما يحظر يوتيوب الـ IP الحالي)."""
     global _last_rotate
     if not (WARP_ROTATE and shutil.which("warp-cli")):
         return False
     with rotate_lock:
-        if time.time() - _last_rotate < 40:      # حد آخر غيّرها للتو
+        if time.time() - _last_rotate < 40:
             return True
         log(f"[warp] rotating identity ({reason})")
         _warp("disconnect")
@@ -292,7 +283,6 @@ def yt_probe(timeout=90):
 
 
 def preflight():
-    """فحص عند التشغيل: هل يوتيوب يقبل الـ IP؟ لو لا، نغيّر هوية WARP ونعيد."""
     state["preflight"] = "running"
     try:
         r = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True, timeout=20)
@@ -385,7 +375,7 @@ def run_once(job_id, data, extra_args):
     if data["mode"] == "segment":
         cmd += ["--download-sections", f"*{fmt_hms(data['start'])}-{fmt_hms(data['end'])}"]
         if data.get("precise", True):
-            cmd.append("--force-keyframes-at-cuts")   # قص دقيق + صوت متزامن
+            cmd.append("--force-keyframes-at-cuts")
     cmd += ["-o", out_tpl, "--", data["url"]]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -412,7 +402,6 @@ def run_once(job_id, data, extra_args):
 
 
 def salvage_partial(job_id, audio_only):
-    """بعد 'إيقاف وحفظ' في اللايف: نحوّل ملفات .part إلى ملف قابل للتشغيل."""
     parts = [p for p in glob.glob(os.path.join(DOWNLOAD_DIR, f"video_{job_id}*.part")) if os.path.getsize(p) > 0]
     if not parts:
         return None
@@ -499,8 +488,7 @@ def run_job(job_id, data):
                     fail_job(job_id, "تم الإيقاف لكن لا يوجد جزء مسجّل يمكن حفظه.", last_tail)
                 return
             if is_blocked(last_err):
-                last_err = ("يوتيوب يطلب تسجيل دخول لهذا الـ IP (حظر). جرّب بعد قليل أو استخدم "
-                            "بروكسي سكني عبر secret اسمه PROXY_URL.")
+                last_err = ("يوتيوب يطلب تسجيل دخول لهذا الـ IP (حظر). تأكد من صحة PROXY_URL في Secrets.")
             fail_job(job_id, (last_err or "فشل غير معروف")[:400], last_tail)
     except Exception as e:
         log(f"[job {job_id}] exception: {e}")
@@ -510,7 +498,7 @@ def run_job(job_id, data):
         procs.pop(job_id, None)
         with jobs_lock:
             exists = job_id in jobs
-        if not exists:                      # المهمة اتلغت/اتحذفت
+        if not exists:
             remove_job_files(job_id)
         else:
             try:
@@ -565,7 +553,7 @@ def cleanup_loop():
                     elif st in ("failed", "expired") and now - j.get("finished_at", j.get("created", now)) > 3600:
                         del jobs[jid]
                         changed = True
-                active = {jid for jid, j in jobs.items() if j.get("status") in ("queued", "running", "finished")}
+            active = {jid for jid, j in jobs.items() if j.get("status") in ("queued", "running", "finished")}
             for p in glob.glob(os.path.join(DOWNLOAD_DIR, "*")):
                 m = re.search(r"(?:video|title)_([0-9a-f]{8})", os.path.basename(p))
                 if m and m.group(1) in active:
@@ -733,7 +721,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 let currentMode = 'full';
 let pollTimer = null;
 const $ = id => document.getElementById(id);
-const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&','<':'<','>':'>','"':'"',"'":'''}[c]));
 
 function setMode(mode) {
   currentMode = mode;
@@ -867,7 +855,7 @@ SVG_POSTER = """<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630
 # ----------------------------------------------------------------- المسارات (Routes)
 @app.route("/")
 def index():
-    host = request.headers.get("X-Public-Host")          # يرسله الـ Worker
+    host = request.headers.get("X-Public-Host")
     base = f"https://{host}/" if host else request.host_url
     resp = Response(HTML_TEMPLATE.replace("__HOST_URL__", base), mimetype="text/html")
     resp.headers["Cache-Control"] = "no-store"
@@ -929,7 +917,7 @@ def api_download():
         jobs[job_id] = {"url": url, "status": "queued", "phase": "في قائمة الانتظار", "progress": "0%",
                         "speed": "", "eta": "", "filename": "", "display_name": "", "error": "",
                         "created": time.time(), "mode": mode}
-    save_jobs()       # خارج القفل (كان هذا هو سبب الـ deadlock في النسخة القديمة)
+    save_jobs()
     threading.Thread(target=run_job, args=(job_id, opts), daemon=True).start()
     return jsonify({"job_id": job_id})
 
