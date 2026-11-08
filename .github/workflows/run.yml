@@ -15,7 +15,7 @@ env:
   PEER_NAME: vps-a
   PEER_REPO: abdallaherg24/Repo-A
   PEER_BRANCH: main
-  WORKFLOW_FILE: vps-relay.yml
+  WORKFLOW_FILE: run.yml
   START_CMD: "python3 main.py"
   HANDOFF_MIN: "300"
   LAST_MIN: "355"
