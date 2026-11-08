@@ -1,9 +1,9 @@
 import os, sys, subprocess, threading, uuid, shlex, json, time
-from flask import Flask, render_template_string, request, jsonify, send_from_directory
+from flask import Flask, render_template_string, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-# مسارات حفظ البيانات لنقلها بين السيرفرات (Relay)
+# مسارات حفظ البيانات
 DATA_DIR = os.path.abspath("data")
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
 JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
@@ -28,7 +28,7 @@ def save_jobs():
         except Exception as e:
             print(f"Error saving jobs: {e}")
 
-# تنظيف تلقائي للملفات القديمة (أكبر من 10 دقائق)
+# تنظيف تلقائي للملفات القديمة بعد 10 دقائق
 def auto_cleanup_loop():
     while True:
         try:
@@ -56,14 +56,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<!-- إعدادات الصورة والعنوان عند مشاركة الرابط عبر السوشيال ميديا (OpenGraph) -->
+<!-- المعاينة الرسمية للموقع عند المشاركة -->
 <title>SERVANT_OF_ALLAH</title>
 <meta property="og:title" content="SERVANT_OF_ALLAH">
 <meta property="og:description" content="أداة فائقة السرعة لتحميل واقتطاع الفيديوهات بأعلى جودة">
-<meta property="og:image" content="https://images.unsplash.com/photo-1609599006353-e629aaabfeae?q=80&w=1200&auto=format&fit=crop">
+<meta property="og:image" content="{{ host_url }}og-image.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://images.unsplash.com/photo-1609599006353-e629aaabfeae?q=80&w=1200&auto=format&fit=crop">
+<meta name="twitter:image" content="{{ host_url }}og-image.png">
 
 <style>
   * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
@@ -211,8 +211,13 @@ function getTimeStr(prefix) {
 }
 
 function submitDownload() {
-  const url = document.getElementById('url').value.trim();
+  let url = document.getElementById('url').value.trim();
   if (!url) { alert('ضع رابط الفيديو أولاً'); return; }
+
+  // تصحيح أخطاء الكتابة التلقائي
+  if (url.startsWith('tps://')) url = 'h' + url;
+  else if (url.startsWith('ps://')) url = 'htt' + url;
+  else if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
 
   const data = {
     url: url,
@@ -271,9 +276,22 @@ fetchJobs();
 </body>
 </html>"""
 
+SVG_POSTER = """<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#0d131e"/>
+  <text x="600" y="80" text-anchor="middle" fill="#2dd4bf" font-family="sans-serif" font-size="36" font-weight="bold" letter-spacing="2">SERVANT_OF_ALLAH</text>
+  <text x="600" y="210" text-anchor="middle" fill="#ffffff" font-family="sans-serif" font-size="42" font-weight="normal">( وَاتَّقُوا يَوْمًا تُرْجَعُونَ فِيهِ إِلَى اللَّهِ ثُمَّ تُوَفَّىٰ كُلُّ نَفْسٍ مَّا كَسَبَتْ وَهُمْ لا يُظْلَمُونَ )</text>
+  <text x="600" y="320" text-anchor="middle" fill="#38bdf8" font-family="sans-serif" font-size="28">سورة البقرة, الآية 281, الجزء 3, الصفحة 47</text>
+  <text x="600" y="440" text-anchor="middle" fill="#cbd5e1" font-family="sans-serif" font-size="26">And be afraid of the Day when you shall be brought back to Allah. Then every person</text>
+  <text x="600" y="490" text-anchor="middle" fill="#cbd5e1" font-family="sans-serif" font-size="26">shall be paid what he earned, and they shall not be dealt with unjustly.</text>
+</svg>"""
+
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(HTML_TEMPLATE, host_url=request.host_url)
+
+@app.route('/og-image.png')
+def og_image():
+    return Response(SVG_POSTER, mimetype='image/svg+xml')
 
 @app.route('/api/jobs')
 def get_jobs():
@@ -295,10 +313,17 @@ def delete_job(job_id):
 @app.route('/api/download', methods=['POST'])
 def start_download():
     data = request.json
+    url = data.get('url', '').strip()
+    
+    if url.startswith('tps://'): url = 'h' + url
+    elif url.startswith('ps://'): url = 'htt' + url
+    elif not url.startswith('http://') and not url.startswith('https://'): url = 'https://' + url
+    data['url'] = url
+
     job_id = str(uuid.uuid4())[:8]
     with jobs_lock:
         jobs[job_id] = {
-            'url': data.get('url'),
+            'url': url,
             'status': 'running',
             'progress': '0%',
             'filename': '',
@@ -330,22 +355,20 @@ def run_ytdlp(job_id, data):
     except:
         extra_args = []
 
-    # إعدادات أقصى سرعة وتجاوز الحظر وتثبيت مفاتيح التزامن بالمللي
+    # استخدام yt-dlp في السحب المتوازي مع 16 اتصال بدون تسليم الرابط لـ ffmpeg كـ Downloader
     cmd = [
         "yt-dlp",
         "--no-playlist",
         "--no-mtime",
         "-N", "16",
-        "--concurrent-fragments", "32",
-        "--buffer-size", "16M",
-        "--extractor-args", "youtube:player_client=android,web",
+        "--concurrent-fragments", "16",
+        "--extractor-args", "youtube:player_client=ios,android,web",
         "--force-keyframe-at-cuts"
     ]
 
     if audio_only:
         cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
     else:
-        # التحديد المباشر لـ h264 مع m4a لتجنب التدميج الثقيل
         if quality == 'best':
             cmd.extend(["-S", "vcodec:h264,acodec:m4a"])
         else:
@@ -355,10 +378,9 @@ def run_ytdlp(job_id, data):
     if mode == 'segment':
         cmd.extend(["--download-sections", f"*{start_time}-{end_time}"])
 
-    # استخدام ffmpeg للقص مع مطابقة الصوت والصورة بدقة 100% دون ترحيل الزمان (Desync)
+    # استخدام ffmpeg كـ Post-Processor فقط لمنع ترحيل الصوت عن الصورة بالمللي
     cmd.extend([
-        "--downloader", "ffmpeg",
-        "--downloader-args", "ffmpeg:-c copy -avoid_negative_ts make_zero -async 1"
+        "--postprocessor-args", "ffmpeg:-c copy -avoid_negative_ts make_zero"
     ])
 
     cmd.extend(extra_args)
