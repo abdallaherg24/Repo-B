@@ -99,6 +99,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .checkbox-group input { width: 16px; height: 16px; accent-color: #14b8a6; cursor: pointer; }
   .btn-submit { width: 100%; padding: 14px; background: #2dd4bf; color: #0d131e; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
   .btn-submit:hover { background: #14b8a6; }
+  .btn-submit:disabled { opacity: 0.6; cursor: not-allowed; }
   .footer-note { text-align: center; color: #64748b; font-size: 12px; margin-top: 12px; }
   .jobs-container { margin-top: 20px; background: #0d131e; border-radius: 8px; padding: 16px; border: 1px solid #283548; min-height: 60px; }
   .job-card { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #161e2e; word-break: break-all; font-size: 13px; }
@@ -227,13 +228,23 @@ function submitDownload() {
     audio_only: document.getElementById('audio_only').checked
   };
 
+  const btn = document.querySelector('.btn-submit');
+  btn.disabled = true;
+
   fetch('/api/download', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   })
   .then(res => res.json())
-  .then(() => fetchJobs());
+  .then(() => {
+    btn.disabled = false;
+    fetchJobs();
+  })
+  .catch(err => {
+    btn.disabled = false;
+    fetchJobs();
+  });
 }
 
 function deleteJob(jobId) {
@@ -266,10 +277,11 @@ function fetchJobs() {
       html += `</div>`;
     });
     box.innerHTML = html || '<div class="empty-jobs">لا توجد تحميلات حالياً. أضف رابطاً وابدأ.</div>';
-  });
+  })
+  .catch(() => {});
 }
 
-setInterval(fetchJobs, 4000);
+setInterval(fetchJobs, 3000);
 fetchJobs();
 </script>
 </body>
@@ -311,7 +323,7 @@ def delete_job(job_id):
 
 @app.route('/api/download', methods=['POST'])
 def start_download():
-    data = request.json
+    data = request.get_json(force=True, silent=True) or {}
     url = data.get('url', '').strip()
     
     if url.startswith('tps://'): url = 'h' + url
@@ -358,25 +370,26 @@ def run_ytdlp(job_id, data):
         "yt-dlp",
         "--no-playlist",
         "--no-mtime",
-        "-N", "8",
-        "--extractor-args", "youtube:player_client=android,web",
-        "--force-keyframe-at-cuts"
+        "-N", "16",
+        "--concurrent-fragments", "16",
+        "--extractor-args", "youtube:player_client=android,web"
     ]
 
     if audio_only:
         cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
     else:
         if quality == 'best':
-            cmd.extend(["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"])
+            cmd.extend(["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"])
         else:
-            cmd.extend(["-f", f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"])
+            cmd.extend(["-f", f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/bv*[height<={quality}]+ba/b[height<={quality}]/b"])
         cmd.extend(["--merge-output-format", "mp4"])
 
     if mode == 'segment':
         cmd.extend(["--download-sections", f"*{start_time}-{end_time}"])
+        cmd.extend(["--force-keyframe-at-cuts"])
 
     cmd.extend([
-        "--postprocessor-args", "Merger:-c copy -avoid_negative_ts make_zero"
+        "--postprocessor-args", "ffmpeg_o:-c copy -avoid_negative_ts make_zero"
     ])
 
     cmd.extend(extra_args)
