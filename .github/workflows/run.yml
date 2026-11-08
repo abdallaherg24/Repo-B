@@ -20,7 +20,6 @@ env:
   HANDOFF_MIN: "300"
   LAST_MIN: "355"
   OVERLAP_SEC: "180"
-  READY_WAIT_SEC: "420"
 
 jobs:
   run:
@@ -57,7 +56,7 @@ jobs:
           sudo apt-get install -y -qq ffmpeg netcat-openbsd jq python3-pip > /dev/null
           pip3 install -U "yt-dlp[default]" flask requests --break-system-packages || pip3 install -U "yt-dlp[default]" flask requests
 
-      - name: تثبيت وتفعيل Cloudflare WARP لتجاوز حظر يوتيوب
+      - name: تثبيت وتفعيل Cloudflare WARP
         if: steps.guard.outputs.skip != 'true'
         run: |
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
@@ -67,7 +66,6 @@ jobs:
           warp-cli mode warp+doh || true
           warp-cli connect || true
           sleep 3
-          echo "WARP شغال وجاهز لتخطي الحظر"
 
       - name: علم وقت البداية
         if: steps.guard.outputs.skip != 'true'
@@ -85,9 +83,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive == 'true'
         run: |
           mkdir -p data
-          echo "بستنى الملفات لحد 15 دقيقة..."
           timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
-          ls -la data
 
       - name: شغل الخدمة وسجل الرابط في Cloudflare Worker
         if: steps.guard.outputs.skip != 'true'
@@ -107,14 +103,18 @@ jobs:
             sleep 1
           done
 
-          setsid nohup cloudflared tunnel --url http://localhost:8090 --no-autoupdate > tunnel.log 2>&1 &
           URL=""
-          for i in $(seq 1 30); do
-            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | grep -v '^https://api\.' | head -1)
-            [ -n "$URL" ] && break
-            sleep 2
+          for attempt in $(seq 1 3); do
+            pkill -f cloudflared || true
+            setsid nohup cloudflared tunnel --url http://127.0.0.1:8090 --no-autoupdate > tunnel.log 2>&1 &
+            for i in $(seq 1 20); do
+              URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | grep -v '^https://api\.' | head -1)
+              [ -n "$URL" ] && break 2
+              sleep 2
+            done
           done
-          echo "tunnel: $URL"
+          
+          echo "Tunnel URL: $URL"
 
           if [ -n "$URL" ]; then
             API="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_ID/values"
@@ -123,17 +123,13 @@ jobs:
               https://*) curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain" --data "$OLD" "$API/previous" > /dev/null ;;
             esac
             curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain" --data "$URL" "$API/current"
-            echo ""
-            echo "تم تسجيل الرابط في الـ Worker"
-          else
-            echo "تحذير: ما لقيتش رابط النفق"
+            echo "تم تحديث الرابط في Cloudflare KV بنجاح"
           fi
 
           mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
           setsid nohup python3 -m http.server 9001 --directory /tmp/ready > /dev/null 2>&1 &
-          echo "الـ VPS جاهز وشغال"
 
-      - name: سلم للجهاز الثاني وانقل مجلد data
+      - name: سلم للجهاز الثاني وانقل البيانات
         if: steps.guard.outputs.skip != 'true'
         env:
           PAT: ${{ secrets.PAT }}
@@ -161,12 +157,12 @@ jobs:
           IP=""; SENT=0; READY=0; LAST_DISPATCH=-9999
           while [ "$(elapsed)" -lt $((LAST_MIN*60)) ]; do
             if [ -z "$IP" ] && [ $(($(elapsed) - LAST_DISPATCH)) -ge 300 ] && [ "$(peer_runs)" -eq 0 ]; then
-              echo "dispatch -> $(dispatch)"
+              dispatch
               LAST_DISPATCH=$(elapsed)
             fi
             [ -z "$IP" ] && IP=$(discover)
             if [ -n "$IP" ] && [ "$SENT" = 0 ]; then
-              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "تم نقل مجلد data بالكامل بنجاح"; fi
+              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; fi
             fi
             if [ -n "$IP" ] && curl -sf --max-time 5 "http://$IP:9001/ready" > /dev/null; then
               READY=1; break
@@ -174,11 +170,8 @@ jobs:
             sleep 10
           done
           if [ "$READY" = 1 ]; then
-            echo "الجهاز الثاني استلم الملفات وجهز، السيرفر القديم سيتوقف"
             sleep "$OVERLAP_SEC"
             pkill -f "$START_CMD" || true
-          else
-            echo "تحذير: الثاني لم يجهز في الوقت، سأستمر لآخر لحظة"
           fi
           rest=$((357*60 - $(elapsed)))
           [ "$rest" -gt 0 ] && sleep "$rest"
