@@ -10,8 +10,9 @@ JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# استرجاع الوظائف السابقة عند بدء التشغيل
 jobs = {}
+jobs_lock = threading.Lock()
+
 if os.path.exists(JOBS_FILE):
     try:
         with open(JOBS_FILE, "r", encoding="utf-8") as f:
@@ -20,26 +21,28 @@ if os.path.exists(JOBS_FILE):
         jobs = {}
 
 def save_jobs():
-    try:
-        with open(JOBS_FILE, "w", encoding="utf-8") as f:
-            json.dump(jobs, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving jobs: {e}")
+    with jobs_lock:
+        try:
+            with open(JOBS_FILE, "w", encoding="utf-8") as f:
+                json.dump(jobs, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving jobs: {e}")
 
-# خادم تنظيف خلفي يمسح الملفات القديمة (أكبر من 10 دقائق) تلقائياً
+# تنظيف تلقائي للملفات القديمة (أكبر من 10 دقائق)
 def auto_cleanup_loop():
     while True:
         try:
             now = time.time()
-            for fid in list(jobs.keys()):
-                j = jobs[fid]
-                filename = j.get('filename')
-                if filename:
-                    fpath = os.path.join(DOWNLOAD_DIR, filename)
-                    if os.path.exists(fpath) and (now - os.path.getmtime(fpath) > 600):
-                        try: os.remove(fpath)
-                        except: pass
-                        j['status'] = 'expired'
+            with jobs_lock:
+                for fid in list(jobs.keys()):
+                    j = jobs[fid]
+                    filename = j.get('filename')
+                    if filename:
+                        fpath = os.path.join(DOWNLOAD_DIR, filename)
+                        if os.path.exists(fpath) and (now - os.path.getmtime(fpath) > 600):
+                            try: os.remove(fpath)
+                            except: pass
+                            j['status'] = 'expired'
             save_jobs()
         except:
             pass
@@ -52,7 +55,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<!-- إعدادات الصورة والعنوان عند مشاركة الرابط عبر السوشيال ميديا (OpenGraph) -->
 <title>SERVANT_OF_ALLAH</title>
+<meta property="og:title" content="SERVANT_OF_ALLAH">
+<meta property="og:description" content="أداة فائقة السرعة لتحميل واقتطاع الفيديوهات بأعلى جودة">
+<meta property="og:image" content="https://images.unsplash.com/photo-1609599006353-e629aaabfeae?q=80&w=1200&auto=format&fit=crop">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://images.unsplash.com/photo-1609599006353-e629aaabfeae?q=80&w=1200&auto=format&fit=crop">
+
 <style>
   * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
   body { background-color: #0d131e; color: #f8fafc; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
@@ -112,26 +124,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="divider"></div>
 
 <div class="container">
-  <div class="main-head">حمّل فيديو أو بث</div>
+  <div class="main-head">تحميل فيديو</div>
   
   <div class="form-group">
-    <label>رابط الفيديو أو البث</label>
+    <label>رابط الفيديو</label>
     <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=..." />
   </div>
 
   <label>نوع التحميل</label>
   <div class="btn-tabs">
-    <button class="btn-tab active" id="tab-segment" onclick="setMode('segment')">جزء من البث</button>
-    <button class="btn-tab" id="tab-full" onclick="setMode('full')">بث كامل</button>
+    <button class="btn-tab active" id="tab-segment" onclick="setMode('segment')">جزء من الفيديو</button>
+    <button class="btn-tab" id="tab-full" onclick="setMode('full')">فيديو كامل</button>
   </div>
 
   <div id="time-picker" class="time-picker-group">
     <div class="time-row">
       <div class="time-label">من</div>
       <div class="time-spinners">
-        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_h', 1)">▲</button><div class="spinner-val" id="s_h">02</div><button class="spinner-btn" onclick="stepTime('s_h', -1)">▼</button></div>
+        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_h', 1)">▲</button><div class="spinner-val" id="s_h">00</div><button class="spinner-btn" onclick="stepTime('s_h', -1)">▼</button></div>
         <span class="time-sep">:</span>
-        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_m', 1)">▲</button><div class="spinner-val" id="s_m">02</div><button class="spinner-btn" onclick="stepTime('s_m', -1)">▼</button></div>
+        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_m', 1)">▲</button><div class="spinner-val" id="s_m">00</div><button class="spinner-btn" onclick="stepTime('s_m', -1)">▼</button></div>
         <span class="time-sep">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_s', 1)">▲</button><div class="spinner-val" id="s_s">00</div><button class="spinner-btn" onclick="stepTime('s_s', -1)">▼</button></div>
       </div>
@@ -139,9 +151,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="time-row">
       <div class="time-label">إلى</div>
       <div class="time-spinners">
-        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_h', 1)">▲</button><div class="spinner-val" id="e_h">02</div><button class="spinner-btn" onclick="stepTime('e_h', -1)">▼</button></div>
+        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_h', 1)">▲</button><div class="spinner-val" id="e_h">00</div><button class="spinner-btn" onclick="stepTime('e_h', -1)">▼</button></div>
         <span class="time-sep">:</span>
-        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_m', 1)">▲</button><div class="spinner-val" id="e_m">04</div><button class="spinner-btn" onclick="stepTime('e_m', -1)">▼</button></div>
+        <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_m', 1)">▲</button><div class="spinner-val" id="e_m">03</div><button class="spinner-btn" onclick="stepTime('e_m', -1)">▼</button></div>
         <span class="time-sep">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_s', 1)">▲</button><div class="spinner-val" id="e_s">00</div><button class="spinner-btn" onclick="stepTime('e_s', -1)">▼</button></div>
       </div>
@@ -151,11 +163,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="form-group">
     <label>الجودة</label>
     <select id="quality">
-      <option value="720" selected>720 (أسرع تحميل بدون كوكيز)</option>
-      <option value="1080">1080</option>
-      <option value="480">480</option>
-      <option value="360">360</option>
-      <option value="best">أفضل جودة</option>
+      <option value="720" selected>720p</option>
+      <option value="1080">1080p</option>
+      <option value="480">480p</option>
+      <option value="360">360p</option>
+      <option value="best">أعلى جودة متاحة</option>
     </select>
   </div>
 
@@ -165,10 +177,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <button class="btn-submit" onclick="submitDownload()">ابدأ التحميل</button>
-  <div class="footer-note">بعد ما تنزّل الملف بيتمسح من السيرفر تلقائيًا.</div>
+  <div class="footer-note">بعد تنزيل الملف يتم حذفه تلقائياً من السيرفر.</div>
 
   <div class="jobs-container" id="jobs-box">
-    <div class="empty-jobs">مفيش تحميلات لسه. حط رابط وابدأ.</div>
+    <div class="empty-jobs">لا توجد تحميلات حالياً. أضف رابطاً وابدأ.</div>
   </div>
 </div>
 
@@ -231,7 +243,7 @@ function fetchJobs() {
     const box = document.getElementById('jobs-box');
     const keys = Object.keys(jobs);
     if (keys.length === 0) {
-      box.innerHTML = '<div class="empty-jobs">مفيش تحميلات لسه. حط رابط وابدأ.</div>';
+      box.innerHTML = '<div class="empty-jobs">لا توجد تحميلات حالياً. أضف رابطاً وابدأ.</div>';
       return;
     }
     let html = '';
@@ -241,7 +253,7 @@ function fetchJobs() {
       html += `<div class="job-card">`;
       html += `<div class="job-url">${j.url}</div>`;
       if (j.status === 'running') {
-        html += `<div class="job-status-running">جاري التحميل ... ${j.progress || ''}</div>`;
+        html += `<div class="job-status-running">جاري التحميل بأقصى سرعة ... ${j.progress || ''}</div>`;
       } else if (j.status === 'finished') {
         html += `<div class="job-status-success"><a class="job-link" href="/downloads/${j.filename}" download onclick="setTimeout(()=>deleteJob('${id}'), 3000)">${j.filename}</a> <span class="job-del" onclick="deleteJob('${id}')">حذف</span></div>`;
       } else if (j.status === 'failed') {
@@ -249,7 +261,7 @@ function fetchJobs() {
       }
       html += `</div>`;
     });
-    box.innerHTML = html || '<div class="empty-jobs">مفيش تحميلات لسه. حط رابط وابدأ.</div>';
+    box.innerHTML = html || '<div class="empty-jobs">لا توجد تحميلات حالياً. أضف رابطاً وابدأ.</div>';
   });
 }
 
@@ -265,31 +277,34 @@ def index():
 
 @app.route('/api/jobs')
 def get_jobs():
-    return jsonify(jobs)
+    with jobs_lock:
+        return jsonify(jobs)
 
 @app.route('/api/delete/<job_id>', methods=['POST'])
 def delete_job(job_id):
-    if job_id in jobs:
-        file_path = os.path.join(DOWNLOAD_DIR, jobs[job_id].get('filename', ''))
-        if os.path.exists(file_path):
-            try: os.remove(file_path)
-            except: pass
-        del jobs[job_id]
-        save_jobs()
+    with jobs_lock:
+        if job_id in jobs:
+            file_path = os.path.join(DOWNLOAD_DIR, jobs[job_id].get('filename', ''))
+            if os.path.exists(file_path):
+                try: os.remove(file_path)
+                except: pass
+            del jobs[job_id]
+            save_jobs()
     return jsonify({'status': 'ok'})
 
 @app.route('/api/download', methods=['POST'])
 def start_download():
     data = request.json
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {
-        'url': data.get('url'),
-        'status': 'running',
-        'progress': '0%',
-        'filename': '',
-        'error': ''
-    }
-    save_jobs()
+    with jobs_lock:
+        jobs[job_id] = {
+            'url': data.get('url'),
+            'status': 'running',
+            'progress': '0%',
+            'filename': '',
+            'error': ''
+        }
+        save_jobs()
     threading.Thread(target=run_ytdlp, args=(job_id, data)).start()
     return jsonify({'job_id': job_id})
 
@@ -315,12 +330,22 @@ def run_ytdlp(job_id, data):
     except:
         extra_args = []
 
-    cmd = ["yt-dlp", "--no-playlist"]
+    # إعدادات أقصى سرعة وتجاوز الحظر وتثبيت مفاتيح التزامن بالمللي
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--no-mtime",
+        "-N", "16",
+        "--concurrent-fragments", "32",
+        "--buffer-size", "16M",
+        "--extractor-args", "youtube:player_client=android,web",
+        "--force-keyframe-at-cuts"
+    ]
 
     if audio_only:
-        cmd.extend(["-x", "--audio-format", "mp3"])
+        cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
     else:
-        # فرز مباشر لتخطي الكوكيز ومطابقة h264 مع m4a بدون إعادة تشفير
+        # التحديد المباشر لـ h264 مع m4a لتجنب التدميج الثقيل
         if quality == 'best':
             cmd.extend(["-S", "vcodec:h264,acodec:m4a"])
         else:
@@ -330,11 +355,10 @@ def run_ytdlp(job_id, data):
     if mode == 'segment':
         cmd.extend(["--download-sections", f"*{start_time}-{end_time}"])
 
-    # سحب متوازي وتثبيت التوقيت فوراً
+    # استخدام ffmpeg للقص مع مطابقة الصوت والصورة بدقة 100% دون ترحيل الزمان (Desync)
     cmd.extend([
-        "--concurrent-fragments", "32",
-        "--hls-use-mpegts",
-        "--downloader-args", "ffmpeg_o:-c copy -avoid_negative_ts make_zero"
+        "--downloader", "ffmpeg",
+        "--downloader-args", "ffmpeg:-c copy -avoid_negative_ts make_zero -async 1"
     ])
 
     cmd.extend(extra_args)
@@ -348,28 +372,32 @@ def run_ytdlp(job_id, data):
                     parts = line.strip().split()
                     for p in parts:
                         if '%' in p:
-                            jobs[job_id]['progress'] = p
+                            with jobs_lock:
+                                jobs[job_id]['progress'] = p
                             break
                 except: pass
             elif 'ERROR:' in line or 'error:' in line:
-                jobs[job_id]['error'] = line.strip()
+                with jobs_lock:
+                    jobs[job_id]['error'] = line.strip()
 
         proc.wait()
 
         actual_files = [f for f in os.listdir(DOWNLOAD_DIR) if job_id in f]
-        if actual_files:
-            jobs[job_id]['status'] = 'finished'
-            jobs[job_id]['filename'] = actual_files[0]
-        elif proc.returncode == 0 and os.path.exists(out_path):
-            jobs[job_id]['status'] = 'finished'
-            jobs[job_id]['filename'] = out_name
-        else:
-            jobs[job_id]['status'] = 'failed'
-            if not jobs[job_id]['error']:
-                jobs[job_id]['error'] = 'حدث خطأ أثناء معالجة التحميل'
+        with jobs_lock:
+            if actual_files:
+                jobs[job_id]['status'] = 'finished'
+                jobs[job_id]['filename'] = actual_files[0]
+            elif proc.returncode == 0 and os.path.exists(out_path):
+                jobs[job_id]['status'] = 'finished'
+                jobs[job_id]['filename'] = out_name
+            else:
+                jobs[job_id]['status'] = 'failed'
+                if not jobs[job_id]['error']:
+                    jobs[job_id]['error'] = 'حدث خطأ أثناء التحميل'
     except Exception as e:
-        jobs[job_id]['status'] = 'failed'
-        jobs[job_id]['error'] = str(e)
+        with jobs_lock:
+            jobs[job_id]['status'] = 'failed'
+            jobs[job_id]['error'] = str(e)
     
     save_jobs()
 
