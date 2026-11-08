@@ -54,7 +54,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg netcat-openbsd jq python3-pip > /dev/null
-          pip3 install -U "yt-dlp[default]" flask flask-cors requests --break-system-packages || pip3 install -U "yt-dlp[default]" flask flask-cors requests
+          pip3 install -U "yt-dlp[default]" flask flask-cors requests waitress --break-system-packages || pip3 install -U "yt-dlp[default]" flask flask-cors requests waitress
 
       - name: تثبيت وتفعيل Cloudflare WARP
         if: steps.guard.outputs.skip != 'true'
@@ -63,7 +63,8 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update -qq && sudo apt-get install -y cloudflare-warp
           warp-cli registration new || true
-          warp-cli mode warp+doh || true
+          warp-cli mode proxy || true
+          warp-cli set-proxy-port 40000 || true
           warp-cli connect || true
           sleep 3
 
@@ -91,6 +92,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
+          YTDLP_PROXY: ${{ secrets.PROXY_URL }}
         run: |
           mkdir -p data
           curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -99,7 +101,7 @@ jobs:
 
           setsid nohup $START_CMD > out.log 2>&1 &
           for i in $(seq 1 20); do
-            curl -sf http://localhost:8090/api/jobs > /dev/null && break
+            curl -sf http://localhost:8090/api/health > /dev/null && break
             sleep 1
           done
 
