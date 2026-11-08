@@ -3,7 +3,7 @@ from flask import Flask, render_template_string, request, jsonify, send_from_dir
 from flask_cors import CORS
 
 app = Flask(__name__)
-# تفعيل CORS لمنع حظر الطلبات من المتصفح أو Cloudflare
+# تفعيل CORS لمنع حظر الطلبات
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 DATA_DIR = os.path.abspath("data")
@@ -30,6 +30,7 @@ def save_jobs():
         except Exception as e:
             print(f"Error saving jobs: {e}")
 
+# تنظيف الملفات القديمة
 def auto_cleanup_loop():
     while True:
         try:
@@ -327,7 +328,7 @@ def delete_job(job_id):
 
 @app.route('/api/download', methods=['POST'])
 def start_download():
-    # قراءة البيانات بأمان لتجنب خطأ 500
+    # استخدام معالجة قوية للبيانات لتجنب خطأ 500
     try:
         data = request.get_json(force=True, silent=True) or {}
     except:
@@ -379,7 +380,7 @@ def run_ytdlp(job_id, data):
     except:
         extra_args = []
 
-    # أوامر مبسطة وآمنة لضمان التحميل بنجاح
+    # أوامر مبسطة ومستقرة للتحميل
     cmd = [
         "yt-dlp",
         "--no-playlist",
