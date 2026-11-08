@@ -56,7 +56,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<!-- المعاينة الرسمية للموقع عند المشاركة -->
 <title>SERVANT_OF_ALLAH</title>
 <meta property="og:title" content="SERVANT_OF_ALLAH">
 <meta property="og:description" content="أداة فائقة السرعة لتحميل واقتطاع الفيديوهات بأعلى جودة">
@@ -111,6 +110,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .job-link { color: #2dd4bf; text-decoration: underline; font-weight: bold; margin-left: 8px; }
   .job-del { color: #94a3b8; cursor: pointer; text-decoration: underline; font-size: 12px; margin-right: 8px; }
   .empty-jobs { text-align: center; color: #64748b; font-size: 14px; margin: 10px 0; }
+  .error-msg { color: #f87171; font-size: 13px; text-align: center; margin-top: 10px; display: none; }
 </style>
 </head>
 <body>
@@ -178,6 +178,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <button class="btn-submit" onclick="submitDownload()">ابدأ التحميل</button>
+  <div class="error-msg" id="err-box"></div>
   <div class="footer-note">بعد تنزيل الملف يتم حذفه تلقائياً من السيرفر.</div>
 
   <div class="jobs-container" id="jobs-box">
@@ -213,6 +214,9 @@ function getTimeStr(prefix) {
 
 function submitDownload() {
   let url = document.getElementById('url').value.trim();
+  const errBox = document.getElementById('err-box');
+  errBox.style.display = 'none';
+
   if (!url) { alert('ضع رابط الفيديو أولاً'); return; }
 
   if (url.startsWith('tps://')) url = 'h' + url;
@@ -236,13 +240,18 @@ function submitDownload() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   })
-  .then(res => res.json())
-  .then(() => {
+  .then(res => {
+    if (!res.ok) throw new Error('السيرفر لم يستجب بشكل صحيح (' + res.status + ')');
+    return res.json();
+  })
+  .then(resData => {
     btn.disabled = false;
     fetchJobs();
   })
   .catch(err => {
     btn.disabled = false;
+    errBox.innerText = 'حدث خطأ أثناء التواصل مع السيرفر: ' + err.message;
+    errBox.style.display = 'block';
     fetchJobs();
   });
 }
@@ -366,11 +375,11 @@ def run_ytdlp(job_id, data):
     except:
         extra_args = []
 
+    # استخدام خيارات قياسية 100% ومجربة تمنع أخطاء الأوامر
     cmd = [
         "yt-dlp",
         "--no-playlist",
         "--no-mtime",
-        "-N", "16",
         "--concurrent-fragments", "16",
         "--extractor-args", "youtube:player_client=android,web"
     ]
@@ -379,18 +388,13 @@ def run_ytdlp(job_id, data):
         cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
     else:
         if quality == 'best':
-            cmd.extend(["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"])
+            cmd.extend(["-f", "bestvideo+bestaudio/best"])
         else:
-            cmd.extend(["-f", f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/bv*[height<={quality}]+ba/b[height<={quality}]/b"])
+            cmd.extend(["-f", f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"])
         cmd.extend(["--merge-output-format", "mp4"])
 
     if mode == 'segment':
-        cmd.extend(["--download-sections", f"*{start_time}-{end_time}"])
-        cmd.extend(["--force-keyframe-at-cuts"])
-
-    cmd.extend([
-        "--postprocessor-args", "ffmpeg_o:-c copy -avoid_negative_ts make_zero"
-    ])
+        cmd.extend(["--download-sections", f"*{start_time}-{end_time}", "--force-keyframe-at-cuts"])
 
     cmd.extend(extra_args)
     cmd.extend(["-o", out_path, url])
