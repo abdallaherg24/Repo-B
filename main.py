@@ -214,7 +214,6 @@ function submitDownload() {
   let url = document.getElementById('url').value.trim();
   if (!url) { alert('ضع رابط الفيديو أولاً'); return; }
 
-  // تصحيح أخطاء الكتابة التلقائي
   if (url.startsWith('tps://')) url = 'h' + url;
   else if (url.startsWith('ps://')) url = 'htt' + url;
   else if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
@@ -355,14 +354,12 @@ def run_ytdlp(job_id, data):
     except:
         extra_args = []
 
-    # استخدام yt-dlp في السحب المتوازي مع 16 اتصال بدون تسليم الرابط لـ ffmpeg كـ Downloader
     cmd = [
         "yt-dlp",
         "--no-playlist",
         "--no-mtime",
-        "-N", "16",
-        "--concurrent-fragments", "16",
-        "--extractor-args", "youtube:player_client=ios,android,web",
+        "-N", "8",
+        "--extractor-args", "youtube:player_client=android,web",
         "--force-keyframe-at-cuts"
     ]
 
@@ -370,17 +367,16 @@ def run_ytdlp(job_id, data):
         cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
     else:
         if quality == 'best':
-            cmd.extend(["-S", "vcodec:h264,acodec:m4a"])
+            cmd.extend(["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"])
         else:
-            cmd.extend(["-S", f"res:{quality},vcodec:h264,acodec:m4a"])
+            cmd.extend(["-f", f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"])
         cmd.extend(["--merge-output-format", "mp4"])
 
     if mode == 'segment':
         cmd.extend(["--download-sections", f"*{start_time}-{end_time}"])
 
-    # استخدام ffmpeg كـ Post-Processor فقط لمنع ترحيل الصوت عن الصورة بالمللي
     cmd.extend([
-        "--postprocessor-args", "ffmpeg:-c copy -avoid_negative_ts make_zero"
+        "--postprocessor-args", "Merger:-c copy -avoid_negative_ts make_zero"
     ])
 
     cmd.extend(extra_args)
@@ -389,18 +385,19 @@ def run_ytdlp(job_id, data):
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in proc.stdout:
-            if '[download]' in line and '%' in line:
+            line_str = line.strip()
+            if '[download]' in line_str and '%' in line_str:
                 try:
-                    parts = line.strip().split()
+                    parts = line_str.split()
                     for p in parts:
                         if '%' in p:
                             with jobs_lock:
                                 jobs[job_id]['progress'] = p
                             break
                 except: pass
-            elif 'ERROR:' in line or 'error:' in line:
+            elif 'ERROR:' in line_str or 'error:' in line_str:
                 with jobs_lock:
-                    jobs[job_id]['error'] = line.strip()
+                    jobs[job_id]['error'] = line_str
 
         proc.wait()
 
@@ -415,7 +412,7 @@ def run_ytdlp(job_id, data):
             else:
                 jobs[job_id]['status'] = 'failed'
                 if not jobs[job_id]['error']:
-                    jobs[job_id]['error'] = 'حدث خطأ أثناء التحميل'
+                    jobs[job_id]['error'] = f'خطأ أثناء التحميل (كود: {proc.returncode})'
     except Exception as e:
         with jobs_lock:
             jobs[job_id]['status'] = 'failed'
