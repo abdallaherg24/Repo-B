@@ -8,7 +8,7 @@ on:
         required: false
         default: "false"
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '10,25,40,55 * * * *'
 
 env:
   MY_NAME: vps-b
@@ -17,63 +17,145 @@ env:
   PEER_BRANCH: main
   WORKFLOW_FILE: run.yml
   START_CMD: "python3 main.py"
-  HANDOFF_MIN: "300"
+  HANDOFF_MIN: "300"        # يبدأ التسليم للجهاز الثاني عند الدقيقة دي
+  FORCE_HANDOFF_MIN: "330"  # أقصى وقت ننتظر فيه انتهاء التحميلات الجارية قبل التسليم
   LAST_MIN: "355"
-  OVERLAP_SEC: "180"
+  OVERLAP_SEC: "180"        # فترة تداخل بين السيرفرين قبل إيقاف القديم
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 358
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.g.outputs.skip }}
     steps:
       - name: حارس يمنع تكرار التشغيل
-        id: guard
-        if: github.event_name == 'schedule'
+        id: g
         env:
           PAT: ${{ secrets.PAT }}
           GHT: ${{ github.token }}
         run: |
-          count() {
-            n=$(curl -s -H "Authorization: Bearer $1" \
-              "https://api.github.com/repos/$2/actions/runs?status=$3" | jq '.total_count // 0' 2>/dev/null)
-            echo "${n:-0}"
-          }
-          me=$(($(count "$GHT" "${{ github.repository }}" in_progress) + $(count "$GHT" "${{ github.repository }}" queued)))
-          peer=$(($(count "$PAT" "$PEER_REPO" in_progress) + $(count "$PAT" "$PEER_REPO" queued)))
-          echo "me=$me peer=$peer"
-          if [ "$me" -gt 1 ] || [ "$peer" -gt 0 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "فيه سلسلة شغالة، هخرج"
+          skip=false
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            count() {
+              n=$(curl -s -H "Authorization: Bearer $1" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$2/actions/runs?status=$3&per_page=1" | jq '.total_count // 0' 2>/dev/null)
+              echo "${n:-0}"
+            }
+            me=$(( $(count "$GHT" "$GITHUB_REPOSITORY" in_progress) + $(count "$GHT" "$GITHUB_REPOSITORY" queued) ))
+            peer=$(( $(count "$PAT" "$PEER_REPO" in_progress) + $(count "$PAT" "$PEER_REPO" queued) ))
+            echo "me=$me peer=$peer"
+            if [ "$me" -gt 1 ] || [ "$peer" -gt 0 ]; then
+              skip=true
+              echo "فيه سلسلة شغالة، هخرج"
+            fi
           fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
+  run:
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 358
+    steps:
       - uses: actions/checkout@v4
-        if: steps.guard.outputs.skip != 'true'
-
-      - name: تثبيت الاعتمادات والأدوات
-        if: steps.guard.outputs.skip != 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg netcat-openbsd jq python3-pip > /dev/null
-          pip3 install -U "yt-dlp[default]" flask flask-cors requests waitress --break-system-packages || pip3 install -U "yt-dlp[default]" flask flask-cors requests waitress
-
-      - name: تثبيت وتفعيل Cloudflare WARP
-        if: steps.guard.outputs.skip != 'true'
-        run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update -qq && sudo apt-get install -y cloudflare-warp
-          warp-cli registration new || true
-          warp-cli mode proxy || true
-          warp-cli set-proxy-port 40000 || true
-          warp-cli connect || true
-          sleep 3
 
       - name: علم وقت البداية
-        if: steps.guard.outputs.skip != 'true'
         run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: تثبيت Deno (اختياري - بيحسّن حل تحديات يوتيوب)
+        uses: denoland/setup-deno@v2
+        continue-on-error: true
+        with:
+          deno-version: v2.x
+
+      - name: تثبيت الاعتمادات والأدوات
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg netcat-openbsd jq curl git > /dev/null
+          python3 -m pip install -q -U --break-system-packages flask flask-cors waitress requests
+          # نسخة nightly من yt-dlp (يوتيوب بيتغير كل كام يوم)
+          python3 -m pip install -q -U --break-system-packages --pre "yt-dlp[default]" \
+            || python3 -m pip install -q -U --break-system-packages "yt-dlp[default]"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          yt-dlp --version
+          ffmpeg -version | head -1
+          node --version
+
+      - name: البروكسي (PROXY_URL لو موجود، وإلا Cloudflare WARP في وضع proxy)
+        continue-on-error: true
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          set +eo pipefail
+          trace() { curl -s --max-time 15 -x "$1" https://www.cloudflare.com/cdn-cgi/trace; }
+          PROXY=""
+          if [ -n "$PROXY_URL" ]; then
+            PROXY="$PROXY_URL"
+            echo "استخدام بروكسي من secret PROXY_URL"
+          else
+            curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list > /dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cloudflare-warp
+            (sudo systemctl enable --now warp-svc || (sudo setsid nohup warp-svc > /tmp/warp-svc.log 2>&1 &))
+            for i in $(seq 1 30); do warp-cli --accept-tos status > /dev/null 2>&1 && break; sleep 1; done
+            # مهم: نضبط وضع proxy قبل الاتصال حتى لا يسحب WARP كل ترافيك الجهاز (يقطع Tailscale و cloudflared)
+            warp-cli --accept-tos mode proxy || warp-cli --accept-tos set-mode proxy
+            warp-cli --accept-tos proxy port 40000 || warp-cli --accept-tos set-proxy-port 40000
+            warp-cli --accept-tos registration new || warp-cli --accept-tos register
+            warp-cli --accept-tos mode proxy || warp-cli --accept-tos set-mode proxy
+            warp-cli --accept-tos connect
+            for i in $(seq 1 30); do
+              st=$(warp-cli --accept-tos status 2>&1)
+              case "$st" in *"Status update: Connected"*) break ;; esac
+              sleep 1
+            done
+            echo "$st"
+            OUT=$(trace "http://127.0.0.1:40000")
+            if echo "$OUT" | grep -q '^warp=\(on\|plus\)'; then
+              PROXY="http://127.0.0.1:40000"
+            else
+              OUT=$(trace "socks5h://127.0.0.1:40000")
+              if echo "$OUT" | grep -q '^warp=\(on\|plus\)'; then
+                echo "WARP يدعم SOCKS5 فقط هنا: تحويله إلى HTTP عبر privoxy (ffmpeg لا يدعم SOCKS)"
+                sudo apt-get install -y -qq privoxy > /dev/null
+                echo "forward-socks5t / 127.0.0.1:40000 ." | sudo tee -a /etc/privoxy/config > /dev/null
+                sudo systemctl restart privoxy
+                sleep 2
+                PROXY="http://127.0.0.1:8118"
+              fi
+            fi
+            if [ -n "$PROXY" ]; then echo "WARP_ROTATE=1" >> "$GITHUB_ENV"; fi
+          fi
+          if [ -n "$PROXY" ]; then
+            echo "YTDLP_PROXY=$PROXY" >> "$GITHUB_ENV"
+            echo "== egress عبر البروكسي =="
+            trace "$PROXY" | grep -E '^(warp|loc)='
+          else
+            echo "::warning::مفيش بروكسي شغال. يوتيوب غالباً هيحظر IP جيتهاب."
+          fi
+
+      - name: مزوّد PO Token (اختياري - بيزوّد فرص نجاح عملاء web)
+        continue-on-error: true
+        run: |
+          set +eo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          python3 -m pip install -q -U --break-system-packages bgutil-ytdlp-pot-provider || exit 0
+          V=$(python3 -m pip show bgutil-ytdlp-pot-provider | awk '/^Version:/{print $2}')
+          git clone -q --depth 1 --single-branch --branch "$V" https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git "$HOME/bgutil" || exit 0
+          cd "$HOME/bgutil/server" || exit 0
+          npm ci --silent && npx tsc || exit 0
+          setsid nohup node build/main.js > "$HOME/bgutil.log" 2>&1 &
+          sleep 4
+          curl -s --max-time 5 http://127.0.0.1:4416/ping || echo "bgutil لم يبدأ (مش مشكلة، yt-dlp هيشتغل من غيره)"
+
       - name: اتصل بشبكة Tailscale
-        if: steps.guard.outputs.skip != 'true'
         uses: tailscale/github-action@v3
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
@@ -81,72 +163,115 @@ jobs:
           args: --ssh
 
       - name: استقبل الملفات من الجهاز الثاني
-        if: steps.guard.outputs.skip != 'true' && github.event.inputs.receive == 'true'
+        if: github.event.inputs.receive == 'true'
         run: |
           mkdir -p data
           timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
 
-      - name: شغل الخدمة وسجل الرابط في Cloudflare Worker
-        if: steps.guard.outputs.skip != 'true'
+      - name: شغل الخدمة + سجل الرابط في Cloudflare KV + سلّم للجهاز الثاني
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
-          YTDLP_PROXY: ${{ secrets.PROXY_URL }}
+          PAT: ${{ secrets.PAT }}
         run: |
+          set +e   # بنتعامل مع الأخطاء يدوياً حتى لا تنتهي الخطوة فجأة
+          export PATH="$HOME/.local/bin:$PATH"
           mkdir -p data
-          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          rm cloudflared.deb
+          elapsed() { echo $(( $(date +%s) - JOB_START )); }
+          health() { curl -s --max-time 5 http://127.0.0.1:8090/api/health; }
 
-          setsid nohup $START_CMD > out.log 2>&1 &
-          for i in $(seq 1 20); do
-            curl -sf http://localhost:8090/api/health > /dev/null && break
-            sleep 1
-          done
+          curl -fsSL -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb > /dev/null 2>&1; rm -f cloudflared.deb
+          cloudflared --version
 
-          URL=""
-          for attempt in $(seq 1 3); do
-            pkill -f cloudflared || true
-            setsid nohup cloudflared tunnel --url http://127.0.0.1:8090 --no-autoupdate > tunnel.log 2>&1 &
-            for i in $(seq 1 20); do
-              URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | grep -v '^https://api\.' | head -1)
-              [ -n "$URL" ] && break 2
+          start_service() {
+            pkill -f "$START_CMD" 2>/dev/null
+            setsid nohup $START_CMD > out.log 2>&1 &
+            for i in $(seq 1 30); do
+              curl -sf http://127.0.0.1:8090/api/health > /dev/null && return 0
+              sleep 1
+            done
+            echo "الخدمة لم تبدأ، آخر سطور اللوج:"; tail -n 30 out.log
+            return 1
+          }
+
+          start_tunnel() {
+            pkill -f "cloudflared tunnel" 2>/dev/null
+            : > tunnel.log
+            setsid nohup cloudflared tunnel --url http://127.0.0.1:8090 --no-autoupdate --protocol http2 --edge-ip-version 4 > tunnel.log 2>&1 &
+            TUNNEL_URL=""
+            for i in $(seq 1 40); do
+              TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | grep -v '^https://api\.' | head -1)
+              [ -n "$TUNNEL_URL" ] && return 0
               sleep 2
             done
-          done
-          
-          echo "Tunnel URL: $URL"
+            return 1
+          }
 
-          if [ -n "$URL" ]; then
+          # لا ننشر الرابط قبل ما نتأكد أنه فعلاً بيرد (DNS + Tunnel جاهزين)
+          wait_tunnel_ready() {
+            for i in $(seq 1 45); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$TUNNEL_URL/api/health")
+              [ "$code" = "200" ] && return 0
+              sleep 2
+            done
+            return 1
+          }
+
+          publish_url() {
             API="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_ID/values"
-            OLD=$(curl -s -H "Authorization: Bearer $CF_API_TOKEN" "$API/current")
+            OLD=$(curl -s --max-time 20 -H "Authorization: Bearer $CF_API_TOKEN" "$API/current")
             case "$OLD" in
-              https://*) curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain" --data "$OLD" "$API/previous" > /dev/null ;;
+              https://*)
+                if [ "$OLD" != "$TUNNEL_URL" ]; then
+                  curl -s --max-time 20 -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -F "value=$OLD" "$API/previous" | jq -c '{success,errors}'
+                fi ;;
             esac
-            curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain" --data "$URL" "$API/current"
+            RES=$(curl -s --max-time 20 -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -F "value=$TUNNEL_URL" "$API/current")
+            echo "$RES" | jq -c '{success,errors}' 2>/dev/null || echo "$RES"
+            [ "$(echo "$RES" | jq -r '.success' 2>/dev/null)" = "true" ]
+          }
+
+          if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ACCOUNT_ID" ] || [ -z "$CF_KV_ID" ]; then
+            echo "::error::أحد secrets الخاصة بـ Cloudflare فاضي (CF_API_TOKEN / CF_ACCOUNT_ID / CF_KV_ID)"
+          fi
+
+          start_service || exit 1
+          start_tunnel || { echo "::error::cloudflared لم يعطِ رابط"; tail -n 30 tunnel.log; exit 1; }
+          echo "Tunnel URL: $TUNNEL_URL"
+          wait_tunnel_ready || echo "::warning::الرابط لم يرد خلال المهلة، سننشره على أي حال"
+
+          # ننتظر فحص يوتيوب الأولي (حتى 150 ثانية) قبل ما نخلي الناس تتحول للسيرفر ده
+          for i in $(seq 1 75); do
+            [ "$(health | jq -r '.preflight // empty')" = "done" ] && break
+            sleep 2
+          done
+          echo "health: $(health)"
+
+          published=0
+          for n in 1 2 3; do
+            if publish_url; then published=1; break; fi
+            sleep 5
+          done
+          if [ "$published" = 1 ]; then
             echo "تم تحديث الرابط في Cloudflare KV بنجاح"
+          else
+            echo "::error::فشل الكتابة في KV. راجع صلاحية التوكن (Workers KV Storage: Edit) و CF_KV_ID و CF_ACCOUNT_ID"
           fi
 
           mkdir -p /tmp/ready && echo ok > /tmp/ready/ready
           setsid nohup python3 -m http.server 9001 --directory /tmp/ready > /dev/null 2>&1 &
 
-      - name: سلم للجهاز الثاني وانقل البيانات
-        if: steps.guard.outputs.skip != 'true'
-        env:
-          PAT: ${{ secrets.PAT }}
-        run: |
-          elapsed() { echo $(($(date +%s) - JOB_START)); }
+          # ---------- المرحلة 1: مراقبة + إعادة تشغيل تلقائي حتى وقت التسليم ----------
           peer_runs() {
             for s in in_progress queued; do
-              curl -s -H "Authorization: Bearer $PAT" \
-                "https://api.github.com/repos/$PEER_REPO/actions/runs?status=$s" | jq '.total_count // 0'
+              curl -s -H "Authorization: Bearer $PAT" "https://api.github.com/repos/$PEER_REPO/actions/runs?status=$s&per_page=1" | jq '.total_count // 0'
             done | awk '{n+=$1} END{print n+0}'
           }
           dispatch() {
             curl -s -o /dev/null -w "%{http_code}" -X POST \
-              -H "Authorization: Bearer $PAT" \
-              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $PAT" -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$PEER_REPO/actions/workflows/$WORKFLOW_FILE/dispatches" \
               -d "{\"ref\":\"$PEER_BRANCH\",\"inputs\":{\"receive\":\"true\"}}"
           }
@@ -154,26 +279,52 @@ jobs:
             sudo tailscale status --json | jq -r --arg n "$PEER_NAME" \
               '[.Peer[]? | select(.Online==true) | select(.HostName | test("^"+$n+"(-[0-9]+)?$"))] | sort_by(.Created) | last | .TailscaleIPs[0] // empty'
           }
-          wait=$((HANDOFF_MIN*60 - $(elapsed)))
-          [ "$wait" -gt 0 ] && sleep "$wait"
+
+          fails=0
+          while [ "$(elapsed)" -lt $((HANDOFF_MIN*60)) ]; do
+            if [ -n "$(health)" ]; then fails=0; else fails=$((fails+1)); fi
+            if [ "$fails" -ge 3 ]; then
+              echo "الخدمة واقفة، إعادة تشغيل..."; start_service; fails=0
+            fi
+            if ! pgrep -f "cloudflared tunnel" > /dev/null; then
+              echo "الـ tunnel وقع، إعادة تشغيل ونشر رابط جديد..."
+              if start_tunnel && wait_tunnel_ready; then publish_url; fi
+            fi
+            sleep 20
+          done
+
+          # ---------- المرحلة 2: ننتظر انتهاء التحميلات الجارية (حتى FORCE_HANDOFF_MIN) ----------
+          while [ "$(elapsed)" -lt $((FORCE_HANDOFF_MIN*60)) ]; do
+            running=$(health | jq -r '.running // 0')
+            if [ "${running:-0}" = "0" ]; then break; fi
+            echo "في $running تحميل شغال، بنستنى قبل التسليم..."
+            sleep 20
+          done
+
+          # ---------- المرحلة 3: التسليم ونقل البيانات ----------
           IP=""; SENT=0; READY=0; LAST_DISPATCH=-9999
           while [ "$(elapsed)" -lt $((LAST_MIN*60)) ]; do
-            if [ -z "$IP" ] && [ $(($(elapsed) - LAST_DISPATCH)) -ge 300 ] && [ "$(peer_runs)" -eq 0 ]; then
-              dispatch
+            if [ -z "$IP" ] && [ $(( $(elapsed) - LAST_DISPATCH )) -ge 300 ] && [ "$(peer_runs)" -eq 0 ]; then
+              code=$(dispatch); echo "dispatch http=$code"
               LAST_DISPATCH=$(elapsed)
             fi
             [ -z "$IP" ] && IP=$(discover)
             if [ -n "$IP" ] && [ "$SENT" = 0 ]; then
-              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; fi
+              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "تم إرسال البيانات"; fi
             fi
             if [ -n "$IP" ] && curl -sf --max-time 5 "http://$IP:9001/ready" > /dev/null; then
               READY=1; break
             fi
             sleep 10
           done
+
           if [ "$READY" = 1 ]; then
+            echo "الجهاز الثاني جاهز. تداخل ${OVERLAP_SEC} ثانية ثم إيقاف هذا السيرفر"
             sleep "$OVERLAP_SEC"
-            pkill -f "$START_CMD" || true
+            pkill -f "$START_CMD"
+            sleep 30
+          else
+            echo "الجهاز الثاني لم يجهز، هنكمل خدمة لحد نهاية المدة"
+            while [ "$(elapsed)" -lt $((357*60)) ]; do sleep 20; done
           fi
-          rest=$((357*60 - $(elapsed)))
-          [ "$rest" -gt 0 ] && sleep "$rest"
+          exit 0
