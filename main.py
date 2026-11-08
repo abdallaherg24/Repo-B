@@ -1,15 +1,10 @@
 import os, sys, subprocess, threading, uuid, shlex, json, time
 from flask import Flask, render_template_string, request, jsonify, send_from_directory, Response
+from flask_cors import CORS
 
 app = Flask(__name__)
-
-# تفعيل CORS لتجاوز قيود المتصفح والـ Worker
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+# تفعيل CORS لمنع حظر الطلبات من المتصفح أو Cloudflare
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 DATA_DIR = os.path.abspath("data")
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
@@ -35,7 +30,6 @@ def save_jobs():
         except Exception as e:
             print(f"Error saving jobs: {e}")
 
-# تنظيف تلقائي للملفات القديمة بعد 10 دقائق
 def auto_cleanup_loop():
     while True:
         try:
@@ -62,26 +56,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
 <title>SERVANT_OF_ALLAH</title>
 <meta property="og:title" content="SERVANT_OF_ALLAH">
 <meta property="og:description" content="أداة فائقة السرعة لتحميل واقتطاع الفيديوهات بأعلى جودة">
 <meta property="og:image" content="{{ host_url }}og-image.png">
 <meta property="og:type" content="website">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="{{ host_url }}og-image.png">
-
 <style>
   * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
   body { background-color: #0d131e; color: #f8fafc; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
-  
   .header-box { text-align: center; margin-bottom: 25px; max-width: 700px; width: 100%; }
   .site-title { color: #2dd4bf; font-size: 22px; font-weight: bold; margin-bottom: 20px; letter-spacing: 1px; }
   .quran-ayah { font-size: 26px; line-height: 1.8; color: #ffffff; font-weight: normal; margin-bottom: 12px; }
   .quran-meta { color: #94a3b8; font-size: 13px; margin-bottom: 15px; }
   .quran-trans { color: #cbd5e1; font-size: 14px; line-height: 1.6; max-width: 600px; margin: 0 auto; direction: ltr; }
   .divider { height: 1px; background: #1e293b; margin: 30px 0 20px 0; width: 100%; max-width: 700px; }
-
   .container { background-color: #161e2e; border-radius: 12px; padding: 24px; width: 100%; max-width: 520px; border: 1px solid #283548; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
   .main-head { text-align: center; font-size: 20px; font-weight: bold; color: #fff; margin-bottom: 20px; }
   .form-group { margin-bottom: 16px; }
@@ -91,7 +79,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .btn-tabs { display: flex; background: #0d131e; border-radius: 8px; padding: 4px; gap: 4px; margin-bottom: 16px; }
   .btn-tab { flex: 1; padding: 10px; border: none; background: transparent; color: #94a3b8; font-weight: bold; border-radius: 6px; cursor: pointer; font-size: 14px; }
   .btn-tab.active { background: #14b8a6; color: #0d131e; }
-  .time-picker-group { background: #0d131e; border-radius: 8px; padding: 12px; margin-bottom: 16px; border: 1px solid #283548; }
+  .time-picker-group { background: #0d131e; border-radius: 8px; padding: 12px; margin-bottom: 16px; border: 1px solid #283548; display: none; }
   .time-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
   .time-row:last-child { margin-bottom: 0; }
   .time-label { width: 40px; color: #94a3b8; font-size: 14px; }
@@ -100,7 +88,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .spinner-btn { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 12px; padding: 2px 6px; }
   .spinner-btn:hover { color: #14b8a6; }
   .spinner-val { background: #161e2e; border: 1px solid #283548; color: #fff; border-radius: 6px; width: 44px; height: 34px; text-align: center; line-height: 32px; font-weight: bold; font-size: 15px; }
-  .time-sep { color: #94a3b8; font-weight: bold; }
   .checkbox-group { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; color: #cbd5e1; font-size: 14px; cursor: pointer; }
   .checkbox-group input { width: 16px; height: 16px; accent-color: #14b8a6; cursor: pointer; }
   .btn-submit { width: 100%; padding: 14px; background: #2dd4bf; color: #0d131e; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
@@ -141,8 +128,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <label>نوع التحميل</label>
   <div class="btn-tabs">
-    <button class="btn-tab active" id="tab-segment" onclick="setMode('segment')">جزء من الفيديو</button>
-    <button class="btn-tab" id="tab-full" onclick="setMode('full')">فيديو كامل</button>
+    <button class="btn-tab active" id="tab-full" onclick="setMode('full')">فيديو كامل</button>
+    <button class="btn-tab" id="tab-segment" onclick="setMode('segment')">جزء من الفيديو</button>
   </div>
 
   <div id="time-picker" class="time-picker-group">
@@ -150,9 +137,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="time-label">من</div>
       <div class="time-spinners">
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_h', 1)">▲</button><div class="spinner-val" id="s_h">00</div><button class="spinner-btn" onclick="stepTime('s_h', -1)">▼</button></div>
-        <span class="time-sep">:</span>
+        <span style="color:#94a3b8;font-weight:bold;">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_m', 1)">▲</button><div class="spinner-val" id="s_m">00</div><button class="spinner-btn" onclick="stepTime('s_m', -1)">▼</button></div>
-        <span class="time-sep">:</span>
+        <span style="color:#94a3b8;font-weight:bold;">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('s_s', 1)">▲</button><div class="spinner-val" id="s_s">00</div><button class="spinner-btn" onclick="stepTime('s_s', -1)">▼</button></div>
       </div>
     </div>
@@ -160,9 +147,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="time-label">إلى</div>
       <div class="time-spinners">
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_h', 1)">▲</button><div class="spinner-val" id="e_h">00</div><button class="spinner-btn" onclick="stepTime('e_h', -1)">▼</button></div>
-        <span class="time-sep">:</span>
+        <span style="color:#94a3b8;font-weight:bold;">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_m', 1)">▲</button><div class="spinner-val" id="e_m">03</div><button class="spinner-btn" onclick="stepTime('e_m', -1)">▼</button></div>
-        <span class="time-sep">:</span>
+        <span style="color:#94a3b8;font-weight:bold;">:</span>
         <div class="spinner-box"><button class="spinner-btn" onclick="stepTime('e_s', 1)">▲</button><div class="spinner-val" id="e_s">00</div><button class="spinner-btn" onclick="stepTime('e_s', -1)">▼</button></div>
       </div>
     </div>
@@ -194,7 +181,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <script>
-let currentMode = 'segment';
+let currentMode = 'full';
 
 function setMode(mode) {
   currentMode = mode;
@@ -248,16 +235,17 @@ function submitDownload() {
     body: JSON.stringify(data)
   })
   .then(res => {
-    if (!res.ok) throw new Error('انقطع الاتصال بالسيرفر (' + res.status + ')');
+    if (!res.ok) throw new Error('خطأ في الاتصال بالسيرفر. الكود: ' + res.status);
     return res.json();
   })
   .then(resData => {
     btn.disabled = false;
+    document.getElementById('url').value = '';
     fetchJobs();
   })
   .catch(err => {
     btn.disabled = false;
-    errBox.innerText = 'تنبيه: ' + err.message;
+    errBox.innerText = 'حدث خطأ: ' + err.message;
     errBox.style.display = 'block';
     fetchJobs();
   });
@@ -282,13 +270,13 @@ function fetchJobs() {
       const j = jobs[id];
       if (j.status === 'expired') return;
       html += `<div class="job-card">`;
-      html += `<div class="job-url">${j.url}</div>`;
+      html += `<div class="job-url" dir="ltr" style="text-align:left;">${j.url}</div>`;
       if (j.status === 'running') {
-        html += `<div class="job-status-running">جاري التحميل ... ${j.progress || ''}</div>`;
+        html += `<div class="job-status-running">جاري التحميل ... ${j.progress || '0%'}</div>`;
       } else if (j.status === 'finished') {
-        html += `<div class="job-status-success"><a class="job-link" href="/downloads/${j.filename}" download onclick="setTimeout(()=>deleteJob('${id}'), 3000)">${j.filename}</a> <span class="job-del" onclick="deleteJob('${id}')">حذف</span></div>`;
+        html += `<div class="job-status-success"><a class="job-link" href="/downloads/${j.filename}" download onclick="setTimeout(()=>deleteJob('${id}'), 3000)">تحميل الملف: ${j.filename}</a> <span class="job-del" onclick="deleteJob('${id}')">حذف</span></div>`;
       } else if (j.status === 'failed') {
-        html += `<div class="job-status-failed">فشل: ${j.error}</div>`;
+        html += `<div class="job-status-failed">فشل التحميل: ${j.error}</div>`;
       }
       html += `</div>`;
     });
@@ -297,7 +285,7 @@ function fetchJobs() {
   .catch(() => {});
 }
 
-setInterval(fetchJobs, 4000);
+setInterval(fetchJobs, 3000);
 fetchJobs();
 </script>
 </body>
@@ -337,14 +325,19 @@ def delete_job(job_id):
             save_jobs()
     return jsonify({'status': 'ok'})
 
-@app.route('/api/download', methods=['POST', 'OPTIONS'])
+@app.route('/api/download', methods=['POST'])
 def start_download():
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'})
-    
-    data = request.get_json(force=True, silent=True) or {}
+    # قراءة البيانات بأمان لتجنب خطأ 500
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+    except:
+        data = {}
+        
     url = data.get('url', '').strip()
     
+    if not url:
+        return jsonify({'error': 'لا يوجد رابط'}), 400
+        
     if url.startswith('tps://'): url = 'h' + url
     elif url.startswith('ps://'): url = 'htt' + url
     elif not url.startswith('http://') and not url.startswith('https://'): url = 'https://' + url
@@ -386,26 +379,24 @@ def run_ytdlp(job_id, data):
     except:
         extra_args = []
 
+    # أوامر مبسطة وآمنة لضمان التحميل بنجاح
     cmd = [
         "yt-dlp",
         "--no-playlist",
-        "--no-mtime",
-        "-N", "16",
-        "--concurrent-fragments", "16",
-        "--extractor-args", "youtube:player_client=android,web"
+        "-N", "4"
     ]
 
     if audio_only:
-        cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
+        cmd.extend(["-x", "--audio-format", "mp3"])
     else:
         if quality == 'best':
-            cmd.extend(["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"])
+            cmd.extend(["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"])
         else:
-            cmd.extend(["-f", f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/bv*[height<={quality}]+ba/b[height<={quality}]/b"])
+            cmd.extend(["-f", f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}]/best"])
         cmd.extend(["--merge-output-format", "mp4"])
 
     if mode == 'segment':
-        cmd.extend(["--download-sections", f"*{start_time}-{end_time}", "--force-keyframe-at-cuts"])
+        cmd.extend(["--download-sections", f"*{start_time}-{end_time}"])
 
     cmd.extend(extra_args)
     cmd.extend(["-o", out_path, url])
