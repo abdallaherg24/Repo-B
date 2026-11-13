@@ -8,7 +8,9 @@ SERVANT_OF_ALLAH - محمّل فيديو مبني على yt-dlp (يعمل على
    يغيّر الـ IP تلقائياً ويجرّب المسار الآخر، والمهمة تنتظر IP نظيف بدل ما تفشل.
 2) السرعة: aria2c بعدة اتصالات متوازية + المواقع غير يوتيوب تنزل مباشرة بدون بروكسي.
 3) القص: يقرأ الجزء المطلوب فقط عبر HTTP Range ثم يقصه بدقة (ffmpeg ultrafast) = سريع + صوت متزامن.
-4) خصوصية: كل زائر (كوكي عشوائي) يرى تحميلاته هو فقط ولا يقدر يحذف/يحمّل ملفات غيره.
+4) مسار wg: WARP كـ«كارت شبكة» WireGuard على مستوى النظام (نفس الـ IP يطلب الرابط ويحمّل بسرعة النظام)
+   بدل وضع proxy البطيء. لا يؤثر على باقي الجهاز: التحميلات فقط تُربط بعنوانه (--source-address).
+5) خصوصية: كل زائر (كوكي عشوائي) يرى تحميلاته هو فقط ولا يقدر يحذف/يحمّل ملفات غيره.
 بدون أي كوكيز يوتيوب وبدون أي خدمة مدفوعة.
 """
 import glob
@@ -43,7 +45,9 @@ PROXY = os.environ.get("YTDLP_PROXY", "").strip()           # يضبطه run.yml
 WARP_ROTATE = os.environ.get("WARP_ROTATE", "0") == "1"     # تدوير هوية WARP عند الحظر
 WARP_PORT = os.environ.get("WARP_PORT", "40000")
 DIRECT_LANE = os.environ.get("DIRECT_LANE", "1") == "1"     # مسار مباشر بدون بروكسي (أسرع ما يمكن)
-WG_NETNS = os.environ.get("WG_NETNS", "0") == "1"           # Kernel WireGuard داخل network namespace
+WG_ADDR = os.environ.get("WG_ADDR", "").strip()             # عنوان واجهة WARP WireGuard (يضبطه run.yml)
+WG_ADDR_FILE = os.environ.get("WG_ADDR_FILE", "/tmp/wg-addr")
+WG_SETUP_CMD = os.environ.get("WG_SETUP_CMD", "").strip()   # سكربت تسجيل/تدوير هوية WireGuard
 
 FILE_TTL = int(os.environ.get("FILE_TTL", "1200"))          # الملف يُحذف بعد 20 دقيقة من اكتماله
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "4"))     # عدد المهام المتوازية
@@ -238,25 +242,29 @@ def err_text(lines):
 
 
 # ----------------------------------------------------------------- الشبكة والمسارات (Lanes)
-def net_args(proxy):
+def net_args(lane):
     a = ["--socket-timeout", "30", "--retries", "5"]
     if shutil.which("node"):
         a += ["--js-runtimes", "node"]          # yt-dlp يحتاج JS runtime لتحديات يوتيوب
-    if proxy:
-        a += ["--proxy", proxy]
+    if lane and lane.get("proxy"):
+        a += ["--proxy", lane["proxy"]]
+    if lane and lane.get("bind"):
+        a += ["--source-address", lane["bind"]]  # يربط الاتصالات بعنوان واجهة WireGuard (aria2c يأخذه أيضاً)
     return a
 
 
-def curl_base(proxy, timeout):
+def curl_base(lane, timeout):
     cmd = ["curl", "-s", "--max-time", str(timeout)]
-    if proxy:
-        cmd += ["-x", proxy]
+    if lane and lane.get("proxy"):
+        cmd += ["-x", lane["proxy"]]
+    if lane and lane.get("bind"):
+        cmd += ["--interface", lane["bind"]]
     return cmd
 
 
-def curl_trace(proxy, timeout=12):
+def curl_trace(lane, timeout=12):
     try:
-        out = subprocess.run(curl_base(proxy, timeout) + ["https://www.cloudflare.com/cdn-cgi/trace"],
+        out = subprocess.run(curl_base(lane, timeout) + ["https://www.cloudflare.com/cdn-cgi/trace"],
                              capture_output=True, text=True, timeout=timeout + 3).stdout
     except Exception:
         return {}
@@ -264,19 +272,20 @@ def curl_trace(proxy, timeout=12):
     return {"warp": res.get("warp", "?"), "loc": res.get("loc", "?")}
 
 
-def speed_test(proxy):
+def speed_test(lane):
     """قياس سرعة تقريبي (Mbps) لمسار معين عبر ملف اختبار من Cloudflare."""
     try:
-        out = subprocess.run(curl_base(proxy, 12) + ["-o", "/dev/null", "-w", "%{speed_download}", SPEED_URL],
+        out = subprocess.run(curl_base(lane, 12) + ["-o", "/dev/null", "-w", "%{speed_download}", SPEED_URL],
                              capture_output=True, text=True, timeout=20).stdout.strip()
         return round(float(out) * 8 / 1e6, 1)
     except Exception:
         return None
 
 
-def add_lane(name, proxy, rotate=False):
+def add_lane(name, proxy, rotate=None, bind=""):
+    """rotate: None | "warp" (warp-cli) | "wg" (سكربت WireGuard)"""
     with lanes_lock:
-        lanes[name] = {"name": name, "proxy": proxy, "rotate": rotate, "yt_ok": None, "checked": 0.0,
+        lanes[name] = {"name": name, "proxy": proxy, "bind": bind, "rotate": rotate, "yt_ok": None, "checked": 0.0,
                        "next_check": 0.0, "fails": 0, "mbps": None, "speed_at": 0.0,
                        "client_idx": 0, "last_error": "", "egress": {}}
 
@@ -289,80 +298,14 @@ def _warp(*args, timeout=40):
         return False, str(e)
 
 
-def _rotate_wg_netns(reason):
-    if not shutil.which("wgcf"):
-        return False
-    log(f"[wgcf] rotating identity ({reason})")
-    work = "/tmp/wgcf_rot"
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work, exist_ok=True)
-    ok = False
-    for i in range(3):
-        r1 = subprocess.run(["wgcf", "register", "--accept-tos"], cwd=work, capture_output=True, text=True, timeout=30)
-        r2 = subprocess.run(["wgcf", "generate"], cwd=work, capture_output=True, text=True, timeout=30) if r1.returncode == 0 else None
-        if r1.returncode == 0 and r2 and r2.returncode == 0 and os.path.exists(os.path.join(work, "wgcf-profile.conf")):
-            ok = True
-            break
-        log(f"[wgcf] register failed ({i + 1}/3): {(r1.stdout + r1.stderr).strip()[:120]}")
-        time.sleep(6 * (i + 1))
-    if not ok:
-        return False
-    priv, v4, v6 = "", "", ""
-    with open(os.path.join(work, "wgcf-profile.conf"), encoding="utf-8") as f:
-        for line in f:
-            if "=" not in line:
-                continue
-            k, v = [x.strip() for x in line.split("=", 1)]
-            if k == "PrivateKey":
-                priv = v
-            elif k == "Address":
-                if ":" in v and not v6:
-                    v6 = v
-                elif "." in v and not v4:
-                    v4 = v
-    if not (priv and v4):
-        return False
-    key_file = "/tmp/wg_rot.key"
-    with open(key_file, "w", encoding="utf-8") as kf:
-        kf.write(priv)
-    os.chmod(key_file, 0o600)
-    try:
-        subprocess.run(["sudo", "ip", "netns", "exec", "warp", "wg", "set", "wg0", "private-key", key_file], check=True, timeout=15)
-        subprocess.run(["sudo", "ip", "-n", "warp", "addr", "flush", "dev", "wg0"], check=True, timeout=15)
-        subprocess.run(["sudo", "ip", "-n", "warp", "addr", "add", v4, "dev", "wg0"], check=True, timeout=15)
-        if v6:
-            subprocess.run(["sudo", "ip", "-n", "warp", "-6", "addr", "add", v6, "dev", "wg0"], timeout=15)
-        subprocess.run(["sudo", "ip", "-n", "warp", "route", "replace", "default", "dev", "wg0"], timeout=15)
-        if v6:
-            subprocess.run(["sudo", "ip", "-n", "warp", "-6", "route", "replace", "default", "dev", "wg0"], timeout=15)
-    except Exception as e:
-        log(f"[wgcf] apply error: {e}")
-        return False
-    finally:
-        try:
-            os.remove(key_file)
-        except Exception:
-            pass
-    time.sleep(2)
-    return True
-
-
 def rotate_warp_ip(reason=""):
-    """يغيّر هوية WARP (عبر wgcf netns أو warp-cli) للحصول على IP جديد."""
+    """يغيّر هوية WARP للحصول على IP جديد. يتعامل مع حدود التسجيل (rate limit) بإعادة المحاولة."""
     global _last_rotate
-    if not WARP_ROTATE:
+    if not (WARP_ROTATE and shutil.which("warp-cli")):
         return False
     with rotate_lock:
         if time.time() - _last_rotate < 25:
             return True
-        if WG_NETNS:
-            ok = _rotate_wg_netns(reason)
-            _last_rotate = time.time()
-            if ok:
-                state["rotations"] += 1
-            return ok
-        if not shutil.which("warp-cli"):
-            return False
         log(f"[warp] rotating identity ({reason})")
         _warp("disconnect")
         _warp("registration", "delete")
@@ -388,6 +331,46 @@ def rotate_warp_ip(reason=""):
         state["rotations"] += 1
         time.sleep(2)
         return ok
+
+
+def rotate_wg_ip(reason=""):
+    """يسجّل هوية WARP جديدة على واجهة wg0 (عنوان/مفتاح جديد) عبر السكربت الذي أنشأه run.yml."""
+    global _last_rotate
+    if not WG_SETUP_CMD:
+        return False
+    with rotate_lock:
+        if time.time() - _last_rotate < 25:
+            return True
+        log(f"[wg] rotating identity ({reason})")
+        try:
+            r = subprocess.run(["bash", "-c", WG_SETUP_CMD], capture_output=True, text=True, timeout=180)
+            ok = r.returncode == 0
+            if not ok:
+                log(f"[wg] setup failed: {(r.stdout + r.stderr).strip()[-200:]}")
+        except Exception as e:
+            ok = False
+            log(f"[wg] setup error: {e}")
+        try:
+            with open(WG_ADDR_FILE, encoding="utf-8") as f:
+                addr = f.read().strip()
+            if addr:
+                with lanes_lock:
+                    if "wg" in lanes:
+                        lanes["wg"]["bind"] = addr
+        except Exception:
+            pass
+        _last_rotate = time.time()
+        state["rotations"] += 1
+        time.sleep(3)
+        return ok
+
+
+def rotate_lane(l, reason=""):
+    if l.get("rotate") == "warp":
+        return rotate_warp_ip(reason)
+    if l.get("rotate") == "wg":
+        return rotate_wg_ip(reason)
+    return False
 
 
 def is_blocked(text):
@@ -421,12 +404,12 @@ def fatal_message(text):
     return None
 
 
-def probe_youtube(proxy):
+def probe_youtube(lane):
     """يجرّب يوتيوب عبر مسار معين بكل مجموعات العملاء. يرجع (نجح؟، رقم المجموعة، نص الخطأ)."""
     last = ""
     for idx, extra in enumerate(YT_CLIENT_SETS):
         cmd = ["yt-dlp", "--ignore-config", "--no-playlist", "--no-warnings", "--print", "%(title)s"]
-        cmd += net_args(proxy) + extra + ["--", PREFLIGHT_URL]
+        cmd += net_args(lane) + extra + ["--", PREFLIGHT_URL]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
@@ -446,12 +429,12 @@ def check_lane(l):
     tries = 3 if l["rotate"] else 1
     ok, idx, out = False, 0, ""
     for t in range(tries):
-        ok, idx, out = probe_youtube(l["proxy"])
+        ok, idx, out = probe_youtube(l)
         if ok:
             break
         log(f"[lane {l['name']}] youtube probe failed ({t + 1}/{tries}): {out.strip()[-120:]}")
         if l["rotate"] and t < tries - 1:
-            rotate_warp_ip(f"lane {l['name']} probe failed")
+            rotate_lane(l, f"lane {l['name']} probe failed")
     now = time.time()
     with lanes_lock:
         l["checked"] = now
@@ -462,10 +445,10 @@ def check_lane(l):
             l.update(yt_ok=False, last_error=out.strip()[-240:],
                      next_check=now + min(BAD_RECHECK_SEC * l["fails"], 300))
     if ok and now - l["speed_at"] > 1800:
-        mbps = speed_test(l["proxy"])
+        mbps = speed_test(l)
         with lanes_lock:
             l["mbps"], l["speed_at"] = mbps, time.time()
-        l["egress"] = curl_trace(l["proxy"]) if l["proxy"] else {}
+        l["egress"] = curl_trace(l) if (l["proxy"] or l["bind"]) else {}
     return ok
 
 
@@ -529,7 +512,7 @@ def pick_lane(url, exclude=()):
                 return max(good, key=lambda l: l["mbps"] or 0)
             unknown = [l for l in cand if l["yt_ok"] is None]
             return unknown[0] if unknown else None
-        for name in ("direct", "proxy"):          # المواقع الأخرى: مباشر أولاً (أسرع)
+        for name in ("direct", "wg", "proxy"):    # المواقع الأخرى: مباشر أولاً (أسرع)
             for l in cand:
                 if l["name"] == name:
                     return l
@@ -547,10 +530,11 @@ def format_args(quality, audio_only):
     return ["-f", f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"] + sort
 
 
-def aria_args():
+def aria_args(lane=None):
     n = ARIA_CONN
+    extra = f" --interface={lane['bind']}" if lane and lane.get("bind") else ""    # اربط aria2c بواجهة WireGuard
     return ["--downloader", "aria2c", "--downloader", "dash,m3u8:native",
-            "--downloader-args", f"aria2c:-x{n} -s{n} -k1M --max-tries=5 --retry-wait=2"]
+            "--downloader-args", f"aria2c:-x{n} -s{n} -k1M --max-tries=5 --retry-wait=2{extra}"]
 
 
 PCT_RE = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
@@ -604,10 +588,10 @@ def ytdlp_download(job_id, data, lane, ctx):
     out_tpl = os.path.join(DOWNLOAD_DIR, f"video_{job_id}.%(ext)s")
     cmd = ["yt-dlp", "--ignore-config", "--no-playlist", "--newline", "--no-colors", "--no-mtime",
            "-N", FRAGMENTS, "--fragment-retries", "10", "--print-to-file", "%(title)s", title_file]
-    cmd += net_args(lane["proxy"]) + client_args(data["url"], lane, ctx["shift"])
+    cmd += net_args(lane) + client_args(data["url"], lane, ctx["shift"])
     cmd += format_args(data["quality"], data["audio_only"])
     if ctx.get("aria"):
-        cmd += aria_args()
+        cmd += aria_args(lane)
     if data.get("live_from_start"):
         cmd.append("--live-from-start")
     cmd += ["-o", out_tpl, "--", data["url"]]
@@ -633,13 +617,15 @@ def ffmpeg_progress_cb(job_id, dur):
     return cb
 
 
-def build_ffmpeg_cut(inputs, start, dur, out, precise, audio_only, proxy):
+def build_ffmpeg_cut(inputs, start, dur, out, precise, audio_only, lane):
     """inputs: [{'src':..., 'url':bool, 'headers':{}, 'kind':'v'|'a'|None}]"""
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"]
     for inp in inputs:
         if inp.get("url"):
-            if proxy:
-                cmd += ["-http_proxy", proxy]
+            if lane and lane.get("proxy"):
+                cmd += ["-http_proxy", lane["proxy"]]
+            if lane and lane.get("bind"):
+                cmd += ["-local_addr", lane["bind"]]       # نفس عنوان WireGuard الذي طلب الرابط
             hdr = "".join(f"{k}: {v}\r\n" for k, v in (inp.get("headers") or {}).items())
             if hdr:
                 cmd += ["-headers", hdr]
@@ -671,7 +657,7 @@ def segment_fast(job_id, data, lane, ctx):
     """يقرأ الجزء المطلوب فقط من الروابط المباشرة (HTTP Range) ويقصه مباشرة."""
     q = "1080" if data["quality"] == "best" else data["quality"]       # حد 1080 للقص لتسريع الترميز
     cmd = ["yt-dlp", "--ignore-config", "--no-playlist", "--no-warnings", "-j"]
-    cmd += net_args(lane["proxy"]) + client_args(data["url"], lane, ctx["shift"])
+    cmd += net_args(lane) + client_args(data["url"], lane, ctx["shift"])
     cmd += format_args(q, data["audio_only"]) + ["--", data["url"]]
     update_job(job_id, phase="جاري تحليل الرابط", progress="0%")
     rc, lines = run_proc(job_id, cmd)
@@ -708,7 +694,7 @@ def segment_fast(job_id, data, lane, ctx):
     title = safe_title(info.get("title", ""))
     with open(os.path.join(DOWNLOAD_DIR, f"title_{job_id}.txt"), "w", encoding="utf-8") as tf:
         tf.write(title + "\n")
-    ff = build_ffmpeg_cut(inputs, start, dur, out, data.get("precise", True), data["audio_only"], lane["proxy"])
+    ff = build_ffmpeg_cut(inputs, start, dur, out, data.get("precise", True), data["audio_only"], lane)
     update_job(job_id, phase="جاري قص الجزء المطلوب", progress="0%")
     with enc_sem:
         rc, flines = run_proc(job_id, ff, on_line=ffmpeg_progress_cb(job_id, dur))
@@ -1398,13 +1384,15 @@ def main():
     load_jobs()
     if DIRECT_LANE:
         add_lane("direct", "")
+    if WG_ADDR:
+        add_lane("wg", "", rotate=("wg" if WG_SETUP_CMD else None), bind=WG_ADDR)
     if PROXY:
-        add_lane("proxy", PROXY, rotate=WARP_ROTATE)
+        add_lane("proxy", PROXY, rotate=("warp" if WARP_ROTATE else None))
     if not lanes:
         add_lane("direct", "")
     threading.Thread(target=cleanup_loop, daemon=True).start()
     threading.Thread(target=lane_monitor, daemon=True).start()
-    log(f"[server] 127.0.0.1:{PORT} lanes={list(lanes)} warp_rotate={WARP_ROTATE} wg_netns={WG_NETNS} aria2c={bool(shutil.which('aria2c'))}")
+    log(f"[server] 127.0.0.1:{PORT} lanes={list(lanes)} wg={bool(WG_ADDR)} warp_rotate={WARP_ROTATE} aria2c={bool(shutil.which('aria2c'))}")
     try:
         from waitress import serve
         serve(app, host="127.0.0.1", port=PORT, threads=48, channel_timeout=600)
