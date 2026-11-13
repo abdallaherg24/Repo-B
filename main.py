@@ -41,9 +41,9 @@ MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "3"))     # عدد المها�
 MAX_ENCODES = int(os.environ.get("MAX_ENCODES", "2"))       # عمليات الترميز (قص) المتوازية
 MAX_USER_ACTIVE = int(os.environ.get("MAX_USER_ACTIVE", "3"))
 MAX_USER_JOBS = int(os.environ.get("MAX_USER_JOBS", "30"))
-FRAGMENTS = os.environ.get("CONCURRENT_FRAGMENTS", "16")    # للبث المباشر/المقاطع المجزأة
+FRAGMENTS = os.environ.get("CONCURRENT_FRAGMENTS", "12")    # للبث المباشر/المقاطع المجزأة
 HTTP_CHUNK = os.environ.get("HTTP_CHUNK_SIZE", "10M")       # كسر تحديد سرعة يوتيوب
-ARIA_CONN = os.environ.get("ARIA_CONN", "16")               # 16 اتصال متوازي لـ aria2c لكل ملف
+ARIA_CONN = os.environ.get("ARIA_CONN", "8")                # 8 اتصالات متوازية لـ aria2c لكل ملف
 ENC_PRESET = os.environ.get("ENC_PRESET", "ultrafast")
 ENC_CRF = os.environ.get("ENC_CRF", "21")
 WAIT_CLEAN_SEC = int(os.environ.get("WAIT_CLEAN_SEC", "600"))
@@ -638,7 +638,7 @@ def segment_fast(job_id, data, lane, ctx):
 
 
 def segment_via_full(job_id, data, lane, ctx):
-    """خطة بديلة: تحميل الفيديو كاملاً بـ 16 اتصال aria2c ثم قص الجزء محلياً."""
+    """خطة بديلة: تحميل الفيديو كاملاً بـ aria2c ثم قص الجزء محلياً."""
     full = dict(data, mode="full")
     if full["quality"] == "best":
         full["quality"] = "1080"
@@ -874,10 +874,10 @@ def cleanup_loop():
         time.sleep(30)
 
 
-# ----------------------------------------------------------------- هوية الزائر (كوكي عشوائي)
+# ----------------------------------------------------------------- هوية الزائر (X-UID + كوكي)
 @app.before_request
 def identify_visitor():
-    uid = request.cookies.get(COOKIE_NAME, "")
+    uid = (request.headers.get("X-UID") or request.args.get("uid") or request.cookies.get(COOKIE_NAME) or "").strip()
     if re.fullmatch(r"[0-9a-f]{32}", uid):
         g.uid, g.new_uid = uid, False
     else:
@@ -945,7 +945,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .btn-submit:hover { background: #14b8a6; }
   .btn-submit:disabled { opacity: 0.6; cursor: not-allowed; }
   .footer-note { text-align: center; color: #64748b; font-size: 12px; margin-top: 12px; }
-  .srv-status { text-align: center; color: #475569; font-size: 11px; margin-top: 6px; direction: ltr; }
+  .srv-status { text-align: center; color: #94a3b8; font-size: 11px; margin-top: 6px; direction: ltr; }
   .jobs-container { margin-top: 20px; background: #0d131e; border-radius: 8px; padding: 16px; border: 1px solid #283548; min-height: 60px; }
   .job-card { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #161e2e; word-break: break-all; font-size: 13px; }
   .job-card:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
@@ -1055,6 +1055,31 @@ let pollTimer = null;
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&','<':'<','>':'>','"':'"',"'":'''}[c]));
 
+function getUid() {
+  try {
+    let u = localStorage.getItem('soa_uid');
+    if (!u || !/^[0-9a-f]{32}$/.test(u)) {
+      const b = new Uint8Array(16);
+      crypto.getRandomValues(b);
+      u = Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem('soa_uid', u);
+    }
+    return u;
+  } catch (e) {
+    if (!window._memUid) {
+      const b = new Uint8Array(16);
+      crypto.getRandomValues(b);
+      window._memUid = Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+    }
+    return window._memUid;
+  }
+}
+const UID = getUid();
+function apiFetch(url, opts = {}) {
+  opts.headers = Object.assign({ 'X-UID': UID }, opts.headers || {});
+  return fetch(url, opts);
+}
+
 function setMode(mode) {
   currentMode = mode;
   $('tab-segment').classList.toggle('active', mode === 'segment');
@@ -1100,7 +1125,7 @@ async function submitDownload() {
   btn.disabled = true;
   btn.innerText = 'جاري بدء التحميل...';
   try {
-    const res = await fetch('/api/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const res = await apiFetch('/api/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
     let body = {};
     try { body = await res.json(); } catch (e) {}
     if (!res.ok) {
@@ -1118,7 +1143,7 @@ async function submitDownload() {
   }
 }
 
-function jobAction(path, id) { return fetch(path + id, { method: 'POST' }).then(fetchJobs).catch(fetchJobs); }
+function jobAction(path, id) { return apiFetch(path + id, { method: 'POST' }).then(fetchJobs).catch(fetchJobs); }
 function deleteJob(id) { return jobAction('/api/delete/', id); }
 function stopJob(id) { return jobAction('/api/stop/', id); }
 
@@ -1137,7 +1162,7 @@ function renderJob(j) {
     h += '<div class="job-actions"><span class="job-del" onclick="stopJob(\'' + j.id + '\')">إيقاف وحفظ ما تم</span><span class="job-del" onclick="deleteJob(\'' + j.id + '\')">إلغاء</span></div>';
   } else if (j.status === 'finished') {
     const name = j.display_name ? j.display_name : j.filename;
-    h += '<div class="job-status-success"><a class="job-link" href="/downloads/' + encodeURIComponent(j.filename) + '" download>تحميل الملف: ' + esc(name) + '</a>';
+    h += '<div class="job-status-success"><a class="job-link" target="_blank" href="/downloads/' + encodeURIComponent(j.filename) + '?uid=' + encodeURIComponent(UID) + '" download>تحميل الملف: ' + esc(name) + '</a>';
     h += '<span class="job-del" onclick="deleteJob(\'' + j.id + '\')">حذف</span></div>';
   } else if (j.status === 'failed') {
     h += '<div class="job-status-failed">فشل التحميل: ' + esc(j.error) + '</div>';
@@ -1158,7 +1183,7 @@ async function fetchJobs() {
   clearTimeout(pollTimer);
   let delay = 12000;
   try {
-    const res = await fetch('/api/jobs', { cache: 'no-store' });
+    const res = await apiFetch('/api/jobs', { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const jobs = await res.json();
     $('conn-note').style.display = 'none';
@@ -1174,10 +1199,10 @@ async function fetchJobs() {
 
 async function fetchStatus() {
   try {
-    const h = await (await fetch('/api/health', { cache: 'no-store' })).json();
+    const h = await (await apiFetch('/api/health', { cache: 'no-store' })).json();
     const parts = (h.lanes || []).map(l => l.name + (l.yt_ok === true ? ' ✓' : (l.yt_ok === false ? ' ✗' : ' …')) + (l.mbps ? ' ' + Math.round(l.mbps) + 'Mbps' : ''));
     $('srv-status').textContent = parts.length ? ('YouTube: ' + parts.join(' | ')) : '';
-  } catch (e) { $('srv-status').textContent = ''; }
+  } catch (e) { $('srv-status').textContent = 'Server offline'; }
 }
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { fetchJobs(); fetchStatus(); } });
