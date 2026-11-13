@@ -67,7 +67,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: تثبيت Deno (اختياري - بيحسّن حل تحديات يوتيوب)
+      - name: تثبيت Deno (يحل تحديات يوتيوب بسرعة وموثوقية)
         uses: denoland/setup-deno@v2
         continue-on-error: true
         with:
@@ -88,7 +88,7 @@ jobs:
           aria2c --version | head -1
           node --version
 
-      - name: البروكسي (PROXY_URL لو موجود، وإلا Cloudflare WARP في وضع proxy)
+      - name: البروكسي (PROXY_URL لو موجود، وإلا Cloudflare WARP مباشرة بدون privoxy)
         continue-on-error: true
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
@@ -106,7 +106,7 @@ jobs:
             sudo apt-get install -y -qq cloudflare-warp
             (sudo systemctl enable --now warp-svc || (sudo setsid nohup warp-svc > /tmp/warp-svc.log 2>&1 &))
             for i in $(seq 1 30); do warp-cli --accept-tos status > /dev/null 2>&1 && break; sleep 1; done
-            # مهم: نضبط وضع proxy قبل الاتصال حتى لا يسحب WARP كل ترافيك الجهاز (يقطع Tailscale و cloudflared)
+            # نضبط وضع proxy قبل الاتصال حتى لا يسحب WARP كل ترافيك الجهاز (يقطع Tailscale و cloudflared)
             warp-cli --accept-tos mode proxy || warp-cli --accept-tos set-mode proxy
             warp-cli --accept-tos proxy port 40000 || warp-cli --accept-tos set-proxy-port 40000
             warp-cli --accept-tos registration new || warp-cli --accept-tos register
@@ -124,25 +124,20 @@ jobs:
             else
               OUT=$(trace "socks5h://127.0.0.1:40000")
               if echo "$OUT" | grep -q '^warp=\(on\|plus\)'; then
-                echo "WARP يدعم SOCKS5 فقط هنا: تحويله إلى HTTP عبر privoxy (ffmpeg لا يدعم SOCKS)"
-                sudo apt-get install -y -qq privoxy > /dev/null
-                echo "forward-socks5t / 127.0.0.1:40000 ." | sudo tee -a /etc/privoxy/config > /dev/null
-                sudo systemctl restart privoxy
-                sleep 2
-                PROXY="http://127.0.0.1:8118"
+                PROXY="socks5h://127.0.0.1:40000"
               fi
             fi
             if [ -n "$PROXY" ]; then echo "WARP_ROTATE=1" >> "$GITHUB_ENV"; fi
           fi
           if [ -n "$PROXY" ]; then
             echo "YTDLP_PROXY=$PROXY" >> "$GITHUB_ENV"
-            echo "== egress عبر البروكسي =="
+            echo "== egress عبر البروكسي ($PROXY) =="
             trace "$PROXY" | grep -E '^(warp|loc)='
           else
             echo "::warning::مفيش بروكسي شغال. يوتيوب غالباً هيحظر IP جيتهاب."
           fi
 
-      - name: مزوّد PO Token (اختياري - بيزوّد فرص نجاح عملاء web)
+      - name: مزوّد PO Token (بيقلل حظر يوتيوب بشكل كبير)
         continue-on-error: true
         run: |
           set +eo pipefail
@@ -177,7 +172,7 @@ jobs:
           PAT: ${{ secrets.PAT }}
           DIRECT_LANE: "1"
         run: |
-          set +e   # بنتعامل مع الأخطاء يدوياً حتى لا تنتهي الخطوة فجأة
+          set +e
           export PATH="$HOME/.local/bin:$PATH"
           mkdir -p data
           elapsed() { echo $(( $(date +%s) - JOB_START )); }
@@ -211,7 +206,6 @@ jobs:
             return 1
           }
 
-          # لا ننشر الرابط قبل ما نتأكد أنه فعلاً بيرد (DNS + Tunnel جاهزين)
           wait_tunnel_ready() {
             for i in $(seq 1 45); do
               code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$TUNNEL_URL/api/health")
@@ -244,7 +238,6 @@ jobs:
           echo "Tunnel URL: $TUNNEL_URL"
           wait_tunnel_ready || echo "::warning::الرابط لم يرد خلال المهلة، سننشره على أي حال"
 
-          # ننتظر فحص يوتيوب الأولي (حتى 150 ثانية) قبل ما نخلي الناس تتحول للسيرفر ده
           for i in $(seq 1 75); do
             [ "$(health | jq -r '.preflight // empty')" = "done" ] && break
             sleep 2
