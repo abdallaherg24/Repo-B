@@ -17,10 +17,10 @@ env:
   PEER_BRANCH: main
   WORKFLOW_FILE: run.yml
   START_CMD: "python3 main.py"
-  HANDOFF_MIN: "300"        # يبدأ التسليم للجهاز الثاني عند الدقيقة دي
-  FORCE_HANDOFF_MIN: "330"  # أقصى وقت ننتظر فيه انتهاء التحميلات الجارية قبل التسليم
+  HANDOFF_MIN: "300"
+  FORCE_HANDOFF_MIN: "315"
   LAST_MIN: "355"
-  OVERLAP_SEC: "180"        # فترة تداخل بين السيرفرين قبل إيقاف القديم
+  OVERLAP_SEC: "180"
 
 jobs:
   guard:
@@ -67,156 +67,24 @@ jobs:
         with:
           node-version: '22'
 
-      - name: تثبيت Deno (اختياري - بيحسّن حل تحديات يوتيوب)
+      - name: تثبيت Deno (لحل تحديات يوتيوب)
         uses: denoland/setup-deno@v2
         continue-on-error: true
         with:
           deno-version: v2.x
 
-      - name: تثبيت الاعتمادات والأدوات
+      - name: تثبيت الاعتمادات والأدوات (curl-cffi مهم جداً)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg aria2 netcat-openbsd jq curl git > /dev/null
+          sudo apt-get install -y -qq ffmpeg netcat-openbsd jq curl git > /dev/null
           python3 -m pip install -q -U --break-system-packages flask flask-cors waitress requests
-          # نسخة nightly من yt-dlp (يوتيوب بيتغير كل كام يوم)
-          python3 -m pip install -q -U --break-system-packages --pre "yt-dlp[default]" \
-            || python3 -m pip install -q -U --break-system-packages "yt-dlp[default]"
+          python3 -m pip install -q -U --break-system-packages --pre "yt-dlp[default,curl-cffi]" \
+            || python3 -m pip install -q -U --break-system-packages "yt-dlp[default,curl-cffi]"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.local/bin:$PATH"
           yt-dlp --version
-          ffmpeg -version | head -1
-          aria2c --version | head -1
-          node --version
 
-      - name: البروكسي (PROXY_URL أو Kernel WARP WireGuard عبر netns + gost)
-        continue-on-error: true
-        env:
-          PROXY_URL: ${{ secrets.PROXY_URL }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set +eo pipefail
-          trace() { curl -s --max-time 15 -x "$1" https://www.cloudflare.com/cdn-cgi/trace; }
-          PROXY=""
-          if [ -n "$PROXY_URL" ]; then
-            PROXY="$PROXY_URL"
-            echo "استخدام بروكسي من secret PROXY_URL"
-          else
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq wireguard-tools iproute2 jq curl > /dev/null
-            GOST_URL=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-              https://api.github.com/repos/go-gost/gost/releases/latest \
-              | jq -r '.assets[] | select(.name | test("linux_amd64\\.tar\\.gz$")) | .browser_download_url' | head -1)
-            if [ -n "$GOST_URL" ] && curl -fsSL "$GOST_URL" -o /tmp/gost.tar.gz; then
-              tar -xzf /tmp/gost.tar.gz -C /tmp gost && sudo mv /tmp/gost /usr/local/bin/gost && sudo chmod +x /usr/local/bin/gost
-              rm -f /tmp/gost.tar.gz
-            fi
-
-            WGCF_URL=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-              https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-              | jq -r '.assets[] | select(.name | test("linux_amd64$")) | .browser_download_url' | head -1)
-            if [ -n "$WGCF_URL" ] && command -v gost >/dev/null && curl -fsSL "$WGCF_URL" -o /tmp/wgcf; then
-              sudo mv /tmp/wgcf /usr/local/bin/wgcf && sudo chmod +x /usr/local/bin/wgcf
-              mkdir -p /tmp/wgcf_work && cd /tmp/wgcf_work
-              for try in 1 2 3; do
-                rm -f wgcf-account.toml wgcf-profile.conf
-                wgcf register --accept-tos && wgcf generate && break
-                sleep $((try * 4))
-              done
-              if [ -f wgcf-profile.conf ]; then
-                PRIV=$(sed -n 's/^PrivateKey *= *//p' wgcf-profile.conf | head -1 | tr -d '\r')
-                PUB=$(sed -n 's/^PublicKey *= *//p' wgcf-profile.conf | head -1 | tr -d '\r')
-                V4=$(sed -n 's/^Address *= *\([0-9.]*\/[0-9]*\).*/\1/p' wgcf-profile.conf | head -1 | tr -d '\r')
-                V6=$(sed -n 's/^Address *= *\([0-9a-fA-F:]*\/[0-9]*\).*/\1/p' wgcf-profile.conf | head -1 | tr -d '\r')
-                EP_HOST=$(sed -n 's/^Endpoint *= *\([^:]*\):.*/\1/p' wgcf-profile.conf | head -1 | tr -d '\r')
-                EP_PORT=$(sed -n 's/^Endpoint *= *[^:]*:\([0-9]*\).*/\1/p' wgcf-profile.conf | head -1 | tr -d '\r')
-                EP_IP=$(getent ahostsv4 "$EP_HOST" | awk '{print $1; exit}')
-                [ -z "$EP_IP" ] && EP_IP="162.159.192.1"
-
-                sudo mkdir -p /etc/netns/warp
-                printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" | sudo tee /etc/netns/warp/resolv.conf > /dev/null
-                sudo ip netns add warp
-                sudo ip link add veth-host type veth peer name veth-warp
-                sudo ip link set veth-warp netns warp
-                sudo ip addr add 10.200.1.1/30 dev veth-host && sudo ip link set veth-host up
-                sudo ip -n warp link set lo up
-                sudo ip -n warp addr add 10.200.1.2/30 dev veth-warp && sudo ip -n warp link set veth-warp up
-
-                printf '%s' "$PRIV" > /tmp/wg_priv.key && chmod 600 /tmp/wg_priv.key
-                sudo ip link add wg0 type wireguard
-                sudo wg set wg0 private-key /tmp/wg_priv.key peer "$PUB" allowed-ips 0.0.0.0/0,::/0 endpoint "${EP_IP}:${EP_PORT:-2408}" persistent-keepalive 25
-                rm -f /tmp/wg_priv.key
-                sudo ip link set wg0 netns warp
-                [ -n "$V4" ] && sudo ip -n warp addr add "$V4" dev wg0
-                [ -n "$V6" ] && sudo ip -n warp -6 addr add "$V6" dev wg0 || true
-                sudo ip -n warp link set wg0 mtu 1420 up
-                sudo ip -n warp route replace default dev wg0
-                [ -n "$V6" ] && sudo ip -n warp -6 route replace default dev wg0 || true
-
-                sudo setsid nohup ip netns exec warp gost -L "http://10.200.1.2:8080" > /tmp/gost.log 2>&1 &
-                sleep 2
-                OUT=$(trace "http://10.200.1.2:8080")
-                if echo "$OUT" | grep -q '^warp=\(on\|plus\)'; then
-                  PROXY="http://10.200.1.2:8080"
-                  echo "WG_NETNS=1" >> "$GITHUB_ENV"
-                  echo "WARP_ROTATE=1" >> "$GITHUB_ENV"
-                  echo "== Kernel WireGuard (wgcf + netns + gost) شغال =="
-                else
-                  echo "wgcf netns فشل الفحص، هنحاول warp-cli + gost"
-                  sudo pkill -f "gost -L" 2>/dev/null || true
-                  sudo ip netns del warp 2>/dev/null || true
-                  sudo ip link del veth-host 2>/dev/null || true
-                fi
-              fi
-              cd "$GITHUB_WORKSPACE"
-            fi
-
-            if [ -z "$PROXY" ]; then
-              curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-              echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list > /dev/null
-              sudo apt-get update -qq
-              sudo apt-get install -y -qq cloudflare-warp
-              (sudo systemctl enable --now warp-svc || (sudo setsid nohup warp-svc > /tmp/warp-svc.log 2>&1 &))
-              for i in $(seq 1 30); do warp-cli --accept-tos status > /dev/null 2>&1 && break; sleep 1; done
-              warp-cli --accept-tos mode proxy || warp-cli --accept-tos set-mode proxy
-              warp-cli --accept-tos proxy port 40000 || warp-cli --accept-tos set-proxy-port 40000
-              warp-cli --accept-tos registration new || warp-cli --accept-tos register
-              warp-cli --accept-tos mode proxy || warp-cli --accept-tos set-mode proxy
-              warp-cli --accept-tos connect
-              for i in $(seq 1 30); do
-                st=$(warp-cli --accept-tos status 2>&1)
-                case "$st" in *"Status update: Connected"*) break ;; esac
-                sleep 1
-              done
-              echo "$st"
-              OUT=$(trace "http://127.0.0.1:40000")
-              if echo "$OUT" | grep -q '^warp=\(on\|plus\)'; then
-                PROXY="http://127.0.0.1:40000"
-              else
-                OUT=$(trace "socks5h://127.0.0.1:40000")
-                if echo "$OUT" | grep -q '^warp=\(on\|plus\)'; then
-                  if command -v gost >/dev/null; then
-                    setsid nohup gost -L "http://127.0.0.1:8118" -F "socks5://127.0.0.1:40000" > /tmp/gost.log 2>&1 &
-                  else
-                    sudo apt-get install -y -qq privoxy > /dev/null
-                    echo "forward-socks5t / 127.0.0.1:40000 ." | sudo tee -a /etc/privoxy/config > /dev/null
-                    sudo systemctl restart privoxy
-                  fi
-                  sleep 2
-                  PROXY="http://127.0.0.1:8118"
-                fi
-              fi
-              if [ -n "$PROXY" ]; then echo "WARP_ROTATE=1" >> "$GITHUB_ENV"; fi
-            fi
-          fi
-          if [ -n "$PROXY" ]; then
-            echo "YTDLP_PROXY=$PROXY" >> "$GITHUB_ENV"
-            echo "== egress عبر البروكسي =="
-            trace "$PROXY" | grep -E '^(warp|loc)='
-          else
-            echo "::warning::مفيش بروكسي شغال. يوتيوب غالباً هيحظر IP جيتهاب."
-          fi
-
-      - name: مزوّد PO Token (اختياري - بيزوّد فرص نجاح عملاء web)
+      - name: مزوّد PO Token (لتقليل الحظر)
         continue-on-error: true
         run: |
           set +eo pipefail
@@ -228,7 +96,7 @@ jobs:
           npm ci --silent && npx tsc || exit 0
           setsid nohup node build/main.js > "$HOME/bgutil.log" 2>&1 &
           sleep 4
-          curl -s --max-time 5 http://127.0.0.1:4416/ping || echo "bgutil لم يبدأ (مش مشكلة، yt-dlp هيشتغل من غيره)"
+          curl -s --max-time 5 http://127.0.0.1:4416/ping || echo "bgutil لم يبدأ"
 
       - name: اتصل بشبكة Tailscale
         uses: tailscale/github-action@v3
@@ -250,7 +118,6 @@ jobs:
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           PAT: ${{ secrets.PAT }}
           DIRECT_LANE: "1"
-          ARIA_CONN: "16"
         run: |
           set +e
           export PATH="$HOME/.local/bin:$PATH"
