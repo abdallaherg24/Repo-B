@@ -1,14 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-SERVANT_OF_ALLAH - محمّل فيديو فائق السرعة مبني على yt-dlp (يعمل على GitHub Actions خلف Cloudflare Worker)
+SERVANT_OF_ALLAH - محمّل فيديو مبني على yt-dlp (يعمل على GitHub Actions خلف Cloudflare Worker)
 نفس الملف في Repo-A و Repo-B.
-
-التحسينات في هذه النسخة:
-1) أقصى سرعة: إلغاء وسيط privoxy البطيء واستخدام socks5h مباشرة + تفعيل --http-chunk-size 10M
-   لكسر تحديد سرعة يوتيوب على الروابط المباشرة، و aria2c بـ 16 اتصال للمسارات المباشرة/HTTP.
-2) قص سريع ومزامن: استخدام yt-dlp --download-sections مع التقطيع السريع (chunks) بدلاً من اتصال ffmpeg الفردي.
-3) مقاومة الحظر: دعم Deno + Node + PO Token + تدوير هوية WARP تلقائياً عند الحظر وتعدد عملاء يوتيوب.
-4) خصوصية: كل زائر (كوكي عشوائي) يرى تحميلاته هو فقط ولا يقدر يحذف/يحمّل ملفات غيره.
 """
 import glob
 import json
@@ -38,19 +31,19 @@ DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
 JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-PROXY = os.environ.get("YTDLP_PROXY", "").strip()           # يضبطه run.yml (WARP أو بروكسي مخصص)
+PROXY = os.environ.get("YTDLP_PROXY", "").strip()           # يضبطه run.yml (http://127.0.0.1:8118 أو بروكسي مخصص)
 WARP_ROTATE = os.environ.get("WARP_ROTATE", "0") == "1"     # تدوير هوية WARP عند الحظر
 WARP_PORT = os.environ.get("WARP_PORT", "40000")
-DIRECT_LANE = os.environ.get("DIRECT_LANE", "1") == "1"     # مسار مباشر بدون بروكسي (سرعة 1Gbps للمواقع الأخرى)
+DIRECT_LANE = os.environ.get("DIRECT_LANE", "1") == "1"     # مسار مباشر بدون بروكسي (سرعة 1.6 Gbps)
 
 FILE_TTL = int(os.environ.get("FILE_TTL", "1200"))          # الملف يُحذف بعد 20 دقيقة من اكتماله
-MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "3"))     # عدد المهام المتوازية (متوازن لتجنب حظر IP)
+MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "3"))     # عدد المهام المتوازية
 MAX_ENCODES = int(os.environ.get("MAX_ENCODES", "2"))       # عمليات الترميز (قص) المتوازية
 MAX_USER_ACTIVE = int(os.environ.get("MAX_USER_ACTIVE", "3"))
 MAX_USER_JOBS = int(os.environ.get("MAX_USER_JOBS", "30"))
-FRAGMENTS = os.environ.get("CONCURRENT_FRAGMENTS", "12")    # تحميل الأجزاء بالتوازي
-HTTP_CHUNK = os.environ.get("HTTP_CHUNK_SIZE", "10M")       # كسر تحديد سرعة يوتيوب للروابط المباشرة
-ARIA_CONN = os.environ.get("ARIA_CONN", "16")               # 16 اتصال متوازي لـ aria2c على المسار المباشر
+FRAGMENTS = os.environ.get("CONCURRENT_FRAGMENTS", "16")    # للبث المباشر/المقاطع المجزأة
+HTTP_CHUNK = os.environ.get("HTTP_CHUNK_SIZE", "10M")       # كسر تحديد سرعة يوتيوب
+ARIA_CONN = os.environ.get("ARIA_CONN", "16")               # 16 اتصال متوازي لـ aria2c لكل ملف
 ENC_PRESET = os.environ.get("ENC_PRESET", "ultrafast")
 ENC_CRF = os.environ.get("ENC_CRF", "21")
 WAIT_CLEAN_SEC = int(os.environ.get("WAIT_CLEAN_SEC", "600"))
@@ -61,12 +54,12 @@ PREFLIGHT_URL = os.environ.get("PREFLIGHT_URL", "https://www.youtube.com/watch?v
 SPEED_URL = "https://speed.cloudflare.com/__down?bytes=100000000"
 COOKIE_NAME = "uid"
 
-# مجموعات عملاء يوتيوب (بدون كوكيز)
+# مجموعات عملاء يوتيوب (تستفيد من PO Token على المسار المباشر والبروكسي)
 YT_CLIENT_SETS = [
     [],
+    ["--extractor-args", "youtube:player_client=tv,web_embedded"],
     ["--extractor-args", "youtube:player_client=tv_downgraded,web_safari,mweb"],
     ["--extractor-args", "youtube:player_client=android_vr,visionos,ios"],
-    ["--extractor-args", "youtube:player_client=web_embedded,tv,ios"],
 ]
 
 # ----------------------------------------------------------------- الحالة
@@ -239,7 +232,7 @@ def err_text(lines):
 
 # ----------------------------------------------------------------- الشبكة والمسارات (Lanes)
 def net_args(proxy):
-    a = ["--socket-timeout", "30", "--retries", "8", "--retry-sleep", "fragment:exp=1:20"]
+    a = ["--socket-timeout", "30", "--retries", "8"]
     if shutil.which("deno"):
         a += ["--js-runtimes", "deno"]
     if shutil.which("node"):
@@ -460,16 +453,16 @@ def lane_summary():
 
 
 def pick_lane(url, exclude=()):
-    """يختار أفضل مسار متاح. يرجع None لو كل مسارات يوتيوب محظورة حالياً."""
+    """يختار أسرع مسار متاح (direct بـ 1.6Gbps أولاً إذا نجح، وإلا proxy)."""
     with lanes_lock:
         cand = [l for l in lanes.values() if l["name"] not in exclude]
         if is_youtube(url):
             good = [l for l in cand if l["yt_ok"] is True]
             if good:
-                return max(good, key=lambda l: l["mbps"] or 0)
+                return max(good, key=lambda l: (10000 if l["name"] == "direct" else 0) + (l["mbps"] or 0))
             unknown = [l for l in cand if l["yt_ok"] is None]
             return unknown[0] if unknown else None
-        for name in ("direct", "proxy"):          # المواقع الأخرى: مباشر أولاً (أسرع - 1Gbps)
+        for name in ("direct", "proxy"):
             for l in cand:
                 if l["name"] == name:
                     return l
@@ -547,15 +540,14 @@ def ytdlp_download(job_id, data, lane, ctx):
            "--print-to-file", "%(title)s", title_file]
     cmd += net_args(lane["proxy"]) + client_args(data["url"], lane, ctx["shift"])
     cmd += format_args(data["quality"], data["audio_only"])
-    is_socks = (lane.get("proxy") or "").lower().startswith("socks")
-    if ctx.get("aria") and not is_socks:
+    if ctx.get("aria"):
         cmd += aria_args()
     if data.get("live_from_start"):
         cmd.append("--live-from-start")
     cmd += ["-o", out_tpl, "--", data["url"]]
     rc, lines = run_proc(job_id, cmd, on_line=lambda s: handle_line(job_id, s))
     path = find_output(job_id) if rc == 0 else None
-    log(f"[job {job_id}] yt-dlp lane={lane['name']} aria={bool(ctx.get('aria') and not is_socks)} rc={rc} {err_text(lines)[:160]}")
+    log(f"[job {job_id}] yt-dlp lane={lane['name']} aria={bool(ctx.get('aria'))} rc={rc} {err_text(lines)[:160]}")
     return {"ok": bool(path), "path": path, "error": err_text(lines), "tail": lines[-14:],
             "title": read_title(job_id)}
 
@@ -575,11 +567,22 @@ def ffmpeg_progress_cb(job_id, dur):
     return cb
 
 
-def build_ffmpeg_cut(inputs, start, dur, out, precise, audio_only):
+def build_ffmpeg_cut(inputs, start, dur, out, precise, audio_only, proxy):
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"]
     for inp in inputs:
+        if inp.get("url"):
+            if proxy and proxy.startswith("http"):
+                cmd += ["-http_proxy", proxy]
+            hdr = "".join(f"{k}: {v}\r\n" for k, v in (inp.get("headers") or {}).items())
+            if hdr:
+                cmd += ["-headers", hdr]
+            cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
         cmd += ["-ss", str(start), "-i", inp["src"]]
     cmd += ["-t", str(dur)]
+    if len(inputs) == 2:
+        vi = next((i for i, x in enumerate(inputs) if x.get("kind") == "v"), 0)
+        ai = next((i for i, x in enumerate(inputs) if x.get("kind") == "a"), 1)
+        cmd += ["-map", f"{vi}:v:0", "-map", f"{ai}:a:0"]
     if audio_only:
         cmd += ["-vn", "-c:a", "libmp3lame", "-q:a", "0"]
     elif precise:
@@ -598,7 +601,7 @@ def seg_ext(data, src_ext="mp4"):
 
 
 def segment_fast(job_id, data, lane, ctx):
-    """يحمّل الجزء المطلوب فقط عبر yt-dlp (بـ HTTP Chunks سريعة + socks5h) ويقصه بدقة."""
+    """يحمّل الجزء المطلوب فقط عبر yt-dlp (--download-sections) مع كسر تحديد السرعة."""
     q = "1080" if data["quality"] == "best" else data["quality"]
     start, end = data["start"], data["end"]
     title_file = os.path.join(DOWNLOAD_DIR, f"title_{job_id}.txt")
@@ -635,7 +638,7 @@ def segment_fast(job_id, data, lane, ctx):
 
 
 def segment_via_full(job_id, data, lane, ctx):
-    """خطة بديلة: تحميل الفيديو كاملاً بالسرعة القصوى ثم قص الجزء محلياً."""
+    """خطة بديلة: تحميل الفيديو كاملاً بـ 16 اتصال aria2c ثم قص الجزء محلياً."""
     full = dict(data, mode="full")
     if full["quality"] == "best":
         full["quality"] = "1080"
@@ -646,7 +649,8 @@ def segment_via_full(job_id, data, lane, ctx):
     out = os.path.join(DOWNLOAD_DIR, f"video_{job_id}.cut.{seg_ext(data, os.path.splitext(src)[1].lstrip('.') or 'mp4')}")
     dur = data["end"] - data["start"]
     update_job(job_id, phase="جاري قص الجزء المطلوب", progress="0%")
-    ff = build_ffmpeg_cut([{"src": src}], data["start"], dur, out, data.get("precise", True), data["audio_only"])
+    ff = build_ffmpeg_cut([{"src": src}], data["start"], dur, out, data.get("precise", True),
+                          data["audio_only"], None)
     with enc_sem:
         rc, flines = run_proc(job_id, ff, on_line=ffmpeg_progress_cb(job_id, dur))
     try:
@@ -684,7 +688,7 @@ def attempt_loop(job_id, data, worker):
         lane = pick_lane(url, exclude)
         if lane is None:
             if yt and time.time() < deadline:
-                update_job(job_id, phase="كل المسارات محظورة مؤقتاً، جاري تغيير الـ IP تلقائياً...", speed="", eta="")
+                update_job(job_id, phase="كل المسارات محظورة مؤقتاً، جاري تغيير الـ IP...", speed="", eta="")
                 monitor_wake.set()
                 time.sleep(4)
                 continue
@@ -1084,7 +1088,7 @@ function showErr(msg) { const b = $('err-box'); b.innerText = msg; b.style.displ
 async function submitDownload() {
   $('err-box').style.display = 'none';
   const url = normalizeUrl($('url').value.trim());
-  if (!url) { alert('ضع رابط الفيديو أولاً'); return; }
+  if (!url) { showErr('ضع رابط الفيديو أولاً'); return; }
   if (currentMode === 'segment' && toSec('e') <= toSec('s')) { showErr('وقت النهاية يجب أن يكون بعد وقت البداية'); return; }
   const data = {
     url: url, mode: currentMode,
@@ -1094,6 +1098,7 @@ async function submitDownload() {
   };
   const btn = $('btn-submit');
   btn.disabled = true;
+  btn.innerText = 'جاري بدء التحميل...';
   try {
     const res = await fetch('/api/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
     let body = {};
@@ -1104,11 +1109,12 @@ async function submitDownload() {
       throw new Error(msg);
     }
     $('url').value = '';
-    fetchJobs();
+    await fetchJobs();
   } catch (err) {
     showErr('حدث خطأ: ' + err.message);
   } finally {
     btn.disabled = false;
+    btn.innerText = 'ابدأ التحميل';
   }
 }
 
@@ -1123,6 +1129,7 @@ function renderJob(j) {
     h += '<div class="job-actions"><span class="job-del" onclick="deleteJob(\'' + j.id + '\')">إلغاء</span></div>';
   } else if (j.status === 'running') {
     let line = esc(j.phase || 'جاري التحميل') + ' ' + esc(j.progress || '');
+    if (j.lane) line += ' [' + esc(j.lane) + ']';
     if (j.speed) line += ' • ' + esc(j.speed);
     if (j.eta) line += ' • ETA ' + esc(j.eta);
     h += '<div class="job-status-running">' + line + '</div>';
@@ -1263,7 +1270,7 @@ def api_download():
             return jsonify({"error": "عندك تحميلات كتير، احذف القديم الأول."}), 429
         jobs[job_id] = {"owner": g.uid, "url": url, "status": "queued", "phase": "في قائمة الانتظار",
                         "progress": "0%", "speed": "", "eta": "", "filename": "", "display_name": "",
-                        "error": "", "created": time.time(), "mode": mode}
+                        "error": "", "created": time.time(), "mode": mode, "lane": ""}
     save_jobs()
     threading.Thread(target=run_job, args=(job_id, opts), daemon=True).start()
     return jsonify({"job_id": job_id})
