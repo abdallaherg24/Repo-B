@@ -76,7 +76,7 @@ jobs:
       - name: تثبيت الاعتمادات والأدوات
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg netcat-openbsd jq curl git > /dev/null
+          sudo apt-get install -y -qq ffmpeg aria2 netcat-openbsd jq curl git > /dev/null
           python3 -m pip install -q -U --break-system-packages flask flask-cors waitress requests
           # نسخة nightly من yt-dlp (يوتيوب بيتغير كل كام يوم)
           python3 -m pip install -q -U --break-system-packages --pre "yt-dlp[default]" \
@@ -85,6 +85,7 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           yt-dlp --version
           ffmpeg -version | head -1
+          aria2c --version | head -1
           node --version
 
       - name: البروكسي (PROXY_URL لو موجود، وإلا Cloudflare WARP في وضع proxy)
@@ -166,7 +167,7 @@ jobs:
         if: github.event.inputs.receive == 'true'
         run: |
           mkdir -p data
-          timeout 900 nc -l 9000 | tar xzf - || echo "مفيش ملفات اتبعتت"
+          timeout 900 nc -l 9000 | tar xf - || echo "مفيش ملفات اتبعتت"
 
       - name: شغل الخدمة + سجل الرابط في Cloudflare KV + سلّم للجهاز الثاني
         env:
@@ -174,6 +175,7 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           PAT: ${{ secrets.PAT }}
+          DIRECT_LANE: "1"
         run: |
           set +e   # بنتعامل مع الأخطاء يدوياً حتى لا تنتهي الخطوة فجأة
           export PATH="$HOME/.local/bin:$PATH"
@@ -199,7 +201,7 @@ jobs:
           start_tunnel() {
             pkill -f "cloudflared tunnel" 2>/dev/null
             : > tunnel.log
-            setsid nohup cloudflared tunnel --url http://127.0.0.1:8090 --no-autoupdate --protocol http2 --edge-ip-version 4 > tunnel.log 2>&1 &
+            setsid nohup cloudflared tunnel --url http://127.0.0.1:8090 --no-autoupdate --edge-ip-version 4 > tunnel.log 2>&1 &
             TUNNEL_URL=""
             for i in $(seq 1 40); do
               TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | grep -v '^https://api\.' | head -1)
@@ -310,7 +312,7 @@ jobs:
             fi
             [ -z "$IP" ] && IP=$(discover)
             if [ -n "$IP" ] && [ "$SENT" = 0 ]; then
-              if tar czf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "تم إرسال البيانات"; fi
+              if tar cf - data | nc -N -w 30 "$IP" 9000; then SENT=1; echo "تم إرسال البيانات"; fi
             fi
             if [ -n "$IP" ] && curl -sf --max-time 5 "http://$IP:9001/ready" > /dev/null; then
               READY=1; break
